@@ -9,10 +9,10 @@ run.py — Главный запускаемый скрипт полного ц�
      - 'Отчет' — свод по перевозчикам, водителям, моделям расчетов и среднему времени
 
 Запуск:
-    python run.py                   # Интерактивный диалог выбора периода
-    python run.py --auto            # Автоматический режим (вчерашний день)
-    python run.py --skip-1c         # Без 1С, только обработка готовых файлов на рабочем столе
-    python run.py --date 04.11.2026 # Конкретная дата
+    python run.py                     # Единый ввод даты (04.11.2026 или 03.11.2026-05.11.2026)
+    python run.py --auto              # Автоматический режим (вчерашний день)
+    python run.py --skip-1c           # Без 1С, только обработка готовых файлов на рабочем столе
+    python run.py --date 04.11.2026   # Конкретная дата
 """
 
 import argparse
@@ -26,50 +26,64 @@ from etrn_optimizer import process_and_style_etrn
 from onec_exporter import get_onec_exporter
 
 
-def parse_date(date_str: str) -> datetime:
-    """Парсинг даты из строки формата ДД.ММ.ГГГГ."""
+def parse_date_str(s: str) -> datetime:
+    """Парсинг даты из строки формата ДД.ММ.ГГГГ или ДД.ММ."""
+    s = s.strip()
+    parts = s.split(".")
+    if len(parts) == 2:
+        s = f"{s}.{datetime.now().year}"
+    elif len(parts) == 3 and len(parts[2]) == 2:
+        s = f"{parts[0]}.{parts[1]}.20{parts[2]}"
     try:
-        return datetime.strptime(date_str.strip(), "%d.%m.%Y")
+        return datetime.strptime(s, "%d.%m.%Y")
     except ValueError:
         raise argparse.ArgumentTypeError(
-            f"Неверный формат даты '{date_str}'. Используйте формат ДД.ММ.ГГГГ (например, 05.11.2026)"
+            f"Неверный формат даты '{s}'. Используйте ДД.ММ.ГГГГ (например, 04.11.2026)"
         )
 
 
-def prompt_period_from_user() -> Tuple[datetime, datetime, str]:
-    """Интерактивный диалог запроса периода для ЭТРН и Контроля подписания."""
+def parse_user_date_input(raw: str) -> Tuple[datetime, datetime, str]:
+    """
+    Единый парсер даты или диапазона дат:
+    - Пустой ввод (Enter) -> вчерашний день
+    - Одна дата (например, 04.11.2026) -> один этот день
+    - Диапазон через дефис (например, 03.11.2026-05.11.2026) -> диапазон с и по
+    """
+    raw = raw.strip()
     today = datetime.now()
     yesterday = today - timedelta(days=1)
-
-    today_str = today.strftime("%d.%m.%Y")
     yesterday_str = yesterday.strftime("%d.%m.%Y")
 
-    print("\n" + "=" * 65)
-    print("  КАКОЙ ПЕРИОД ВЫГРУЗИТЬ ДЛЯ ЭТРН И КОНТРОЛЯ ПОДПИСАНИЯ?")
-    print("=" * 65)
-    print(f" 1 - Вчерашний день ({yesterday_str}) [по умолчанию]")
-    print(f" 2 - Сегодняшний день ({today_str})")
-    print(" 3 - Ввести одну дату вручную (ДД.ММ.ГГГГ)")
-    print(" 4 - Ввести диапазон дат (с даты по дату)")
-    print("-" * 65)
-
-    choice = input("Ваш выбор (1, 2, 3, 4 или Enter): ").strip()
-
-    if choice == "2":
-        return today, today, today_str
-    elif choice == "3":
-        raw = input("Введите дату (например, 01.11.2026): ").strip()
-        dt = parse_date(raw) if raw else yesterday
-        return dt, dt, dt.strftime("%d.%m.%Y")
-    elif choice == "4":
-        raw_from = input("Дата начала (С): ").strip()
-        raw_to = input("Дата окончания (По): ").strip()
-        dt_from = parse_date(raw_from)
-        dt_to = parse_date(raw_to)
-        label = f"{dt_from.strftime('%d.%m.%Y')}_{dt_to.strftime('%d.%m.%Y')}"
-        return dt_from, dt_to, label
-    else:
+    if not raw:
         return yesterday, yesterday, yesterday_str
+
+    if "-" in raw:
+        parts = raw.split("-", 1)
+        d_from = parse_date_str(parts[0])
+        d_to = parse_date_str(parts[1])
+        label = f"{d_from.strftime('%d.%m.%Y')}_{d_to.strftime('%d.%m.%Y')}"
+        return d_from, d_to, label
+    else:
+        d = parse_date_str(raw)
+        return d, d, d.strftime("%d.%m.%Y")
+
+
+def prompt_period_from_user() -> Tuple[datetime, datetime, str]:
+    """Единый интерактивный запрос даты или диапазона."""
+    yesterday = datetime.now() - timedelta(days=1)
+    yesterday_str = yesterday.strftime("%d.%m.%Y")
+
+    print("\n" + "=" * 70)
+    print("  ВВЕДИТЕ ДАТУ ИЛИ ДИАПАЗОН ДАТ ДЛЯ ЭТРН И ОТЧЕТА ПОДПИСАНИЯ")
+    print("=" * 70)
+    print(f"Примеры ввода:")
+    print(f" • Одна дата:     04.11.2026")
+    print(f" • Диапазон дат:  03.11.2026-05.11.2026")
+    print(f" • Нажмите Enter для вчерашней даты [{yesterday_str}]")
+    print("-" * 70)
+
+    raw = input("Дата или диапазон (Enter для вчера): ").strip()
+    return parse_user_date_input(raw)
 
 
 def main():
@@ -88,21 +102,9 @@ def main():
     )
     parser.add_argument(
         "--date",
-        type=parse_date,
+        type=str,
         default=None,
-        help="Дата для отчета (ДД.ММ.ГГГГ). Выгружает этот конкретный день.",
-    )
-    parser.add_argument(
-        "--date-from",
-        type=parse_date,
-        default=None,
-        help="Начало периода (ДД.ММ.ГГГГ)",
-    )
-    parser.add_argument(
-        "--date-to",
-        type=parse_date,
-        default=None,
-        help="Окончание периода (ДД.ММ.ГГГГ)",
+        help="Дата или диапазон дат (например, 04.11.2026 или 03.11.2026-05.11.2026)",
     )
 
     args = parser.parse_args()
@@ -116,11 +118,7 @@ def main():
     marshrut_start, marshrut_end = cfg.get_marshrut_period()
 
     if args.date:
-        etrn_start, etrn_end = args.date, args.date
-        date_label = args.date.strftime("%d.%m.%Y")
-    elif args.date_from and args.date_to:
-        etrn_start, etrn_end = args.date_from, args.date_to
-        date_label = f"{args.date_from.strftime('%d.%m.%Y')}_{args.date_to.strftime('%d.%m.%Y')}"
+        etrn_start, etrn_end, date_label = parse_user_date_input(args.date)
     elif args.auto:
         yesterday = datetime.now() - timedelta(days=1)
         etrn_start, etrn_end = yesterday, yesterday
