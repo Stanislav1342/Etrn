@@ -2,20 +2,28 @@
 onec_exporter.py — Автоматизация выгрузки таблиц из 1С:Предприятие через прямые ссылки (e1cib).
 
 На Windows:
-  Использует промышленный RPA-стандарт для 1С:
-    1. Поиск и активация окна 1С (обход SetForegroundWindow Lock).
-    2. Прямой переход по навигационным ссылкам (Shift + F11):
+  Использует промышленный RPA-стандарт для 1С:Предприятие (Управляемый интерфейс / Такси):
+    1. Поиск, максимизация и активация главного окна 1С.
+    2. Прямой переход по постоянным навигационным ссылкам (Shift + F11):
        - «Маршрутный лист»: e1cib/list/Документ.МаршрутныйЛист
        - «Электронные транспортные накладные»: e1cib/list/Документ.ЭлектроннаяТранспортнаяНакладная
        - «Контроль подписания»: e1cib/data/Справочник.ВариантыОтчетов?ref=946700e0ed9e2e9e11f1495d81d50ffe
-       (ПОЛНАЯ независимость от меню «Избранное», разрешения экрана и порядка пунктов!)
-    3. Установка периода списков через плашку периода или Еще ➔ Установить период.
-    4. Выгрузка списков в Excel через контекстное меню таблицы / Еще ➔ Вывести список... ➔ Ctrl+S.
-    5. Заполнение дат отчета, нажатие «Сформировать» (F5) и сохранение в 'Процент.xlsx'.
-    6. Закрытие сформированных табличных вкладок (Ctrl+F4) ТОЛЬКО после проверки записи файла на диск.
+       (В диалоге перехода используется кнопка «Вставить из буфера», что исключает любые сбои раскладки).
+    3. Раздел «Маршрутный лист»:
+       - Заполнение дат фильтра отгрузки («Больше или равно» и «Меньше или равно») в шапке списка.
+       - Прямой вызов кнопки «Вывести список...» на панели инструментов.
+       - Сохранение таблицы в 'Модель расчетов.xlsx' и закрытие вкладки «Информация по МЛ» (Ctrl+F4).
+    4. Раздел «Электронные транспортные накладные»:
+       - Установка периода через «Еще ▾» ➔ «Установить период...» (или плашку периода) в диалоге «Выберите период».
+       - Меню «Еще ▾» ➔ «Вывести список...» ➔ подтверждение колонок.
+       - Сохранение таблицы в 'ЭТРН 1с.xlsx' и закрытие вкладки «Список» (Ctrl+F4).
+    5. Отчет «Контроль подписания перевозчиков по ЭТРН»:
+       - Заполнение дат в шапке отчета.
+       - Нажатие «Сформировать» (F5) и ожидание готовности.
+       - Сохранение в 'Процент.xlsx' и закрытие вкладки отчета (Ctrl+F4).
 
 На macOS / Linux:
-  Автоматически активируется MockOneCExporter — симулятор с подробным логированием e1cib-переходов.
+  Автоматически активируется MockOneCExporter — симулятор полного пайплайна с подробным логированием.
 """
 
 import logging
@@ -25,7 +33,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from config import Config, get_config
 
@@ -33,10 +41,25 @@ logger = logging.getLogger("OneCExporter")
 
 
 def set_clipboard(text: str) -> None:
-    """Копирует текст в буфер обмена Windows через clip.exe (UTF-16) без ошибок раскладки."""
+    """Копирует текст в буфер обмена Windows (через Win32 API / clip.exe) без ошибок кодировки."""
     if sys.platform == "win32":
         try:
+            import win32clipboard
+            import win32con
+
+            win32clipboard.OpenClipboard()
+            try:
+                win32clipboard.EmptyClipboard()
+                win32clipboard.SetClipboardText(text, win32clipboard.CF_UNICODETEXT)
+            finally:
+                win32clipboard.CloseClipboard()
+            return
+        except Exception as e:
+            logger.debug("win32clipboard error: %s, fallback to clip.exe", e)
+
+        try:
             subprocess.run(["clip"], input=text.encode("utf-16"), check=True)
+            return
         except Exception as e:
             logger.warning("Не удалось скопировать текст в clip: %s", e)
     else:
@@ -80,29 +103,29 @@ class MockOneCExporter(BaseOneCExporter):
         print("  [1С-СИМУЛЯТОР / macOS] Эмуляция автоматической выгрузки из 1С")
         print("=" * 70)
         print(f" 1. Поиск главного окна 1С: '{self.cfg.onec_window_regex}' -> [Найдено]")
-        print(" 2. Активация окна и вывод на передний план (SetForegroundWindow + ESC)")
+        print(" 2. Активация и максимизация окна 1С (ShowWindow SW_MAXIMIZE)")
         print("-" * 70)
 
         # 1. Маршрутный лист
         print(f" 3. Прямой переход по ссылке (Shift + F11):")
         print(f"    URL: «{self.cfg.url_marshrut}»")
         print(f"    Открыт раздел: «{self.cfg.title_marshrut}» [OK]")
-        print(f"    Установка периода списка: с {m_start} по {m_end}")
-        print(f"    Таблица Еще ➔ «Вывести список...» ➔ [ОК]")
+        print(f"    Установка дат в фильтре отгрузки: с {m_start} по {m_end}")
+        print(f"    Кнопка тулбара «Вывести список...» ➔ [ОК] в диалоге")
         print(f"    Сохранение (Ctrl+S) ➔ «{self.cfg.model_file}»")
-        print(f"    Закрытие сформированной вкладки (Ctrl+F4)")
-        time.sleep(0.5)
+        print(f"    Закрытие вкладки «Информация по МЛ» (Ctrl+F4)")
+        time.sleep(0.4)
 
         # 2. ЭТРН
         print("-" * 70)
         print(f" 4. Прямой переход по ссылке (Shift + F11):")
         print(f"    URL: «{self.cfg.url_etrn}»")
         print(f"    Открыт раздел: «{self.cfg.title_etrn}» [OK]")
-        print(f"    Установка периода списка: с {e_start} по {e_end}")
-        print(f"    Таблица Еще ➔ «Вывести список...» ➔ [ОК]")
+        print(f"    Установка периода списка через диалог: с {e_start} по {e_end}")
+        print(f"    Таблица Еще ➔ «Вывести список...» ➔ [ОК] в диалоге")
         print(f"    Сохранение (Ctrl+S) ➔ «{self.cfg.etrn_file}»")
-        print(f"    Закрытие сформированной вкладки (Ctrl+F4)")
-        time.sleep(0.5)
+        print(f"    Закрытие вкладки «Список» (Ctrl+F4)")
+        time.sleep(0.4)
 
         # 3. Контроль подписания
         print("-" * 70)
@@ -113,7 +136,7 @@ class MockOneCExporter(BaseOneCExporter):
         print(f"    Нажатие кнопки «Сформировать» (F5) ➔ Формирование отчета...")
         print(f"    Сохранение (Ctrl+S) ➔ «{self.cfg.percent_file}»")
         print(f"    Закрытие вкладки отчета (Ctrl+F4)")
-        time.sleep(0.5)
+        time.sleep(0.4)
 
         print("=" * 70)
         print("  ✓ [1С-СИМУЛЯТОР] Все 3 таблицы успешно выгружены на рабочий стол.")
@@ -129,7 +152,7 @@ class MockOneCExporter(BaseOneCExporter):
 class WindowsOneCExporter(BaseOneCExporter):
     """
     Реальный сервис автоматизации 1С:Предприятие под Windows.
-    Использует прямые навигационные ссылки 1С (Shift+F11 / e1cib) и Win32 события.
+    Использует прямые навигационные ссылки 1С (Shift+F11 / e1cib) и UI Automation.
     """
 
     def __init__(self, cfg: Optional[Config] = None):
@@ -166,7 +189,7 @@ class WindowsOneCExporter(BaseOneCExporter):
         self.win32api.keybd_event(vk_code, 0, flags, 0)
 
     def _send_hotkey(self, *vk_codes: int) -> None:
-        """Нажатие комбинации клавиш по их виртуальным кодам (напр. Shift+F11, Ctrl+S)."""
+        """Нажатие комбинации клавиш по их виртуальным кодам."""
         for code in vk_codes:
             self._send_vk(code, down=True)
             time.sleep(0.04)
@@ -191,6 +214,10 @@ class WindowsOneCExporter(BaseOneCExporter):
         """Закрыть текущую вкладку (Ctrl + F4): VK_F4 = 0x73."""
         self._send_hotkey(self.win32con.VK_CONTROL, self.win32con.VK_F4)
 
+    def _hotkey_f5(self) -> None:
+        """Сформировать отчет / обновить (F5): VK_F5 = 0x74."""
+        self._send_hotkey(self.win32con.VK_F5)
+
     def _hotkey_enter(self) -> None:
         """Нажатие Enter."""
         self._send_hotkey(self.win32con.VK_RETURN)
@@ -210,17 +237,17 @@ class WindowsOneCExporter(BaseOneCExporter):
     def _select_all_and_paste(self, text: str) -> None:
         """Выделяет всё поле (Ctrl+A), копирует текст в буфер и вставляет (Ctrl+V)."""
         set_clipboard(text)
-        time.sleep(0.1)
+        time.sleep(0.08)
         self._send_hotkey(self.win32con.VK_CONTROL, 0x41)  # Ctrl + A
-        time.sleep(0.1)
+        time.sleep(0.08)
         self._paste_clipboard()
         time.sleep(0.1)
 
     # ---------------------------------------------------------------------
-    # Активация окна 1С
+    # Активация и максимизация окна 1С
     # ---------------------------------------------------------------------
     def _find_and_activate_1c(self) -> None:
-        """Находит главное окно 1С по заголовку и гарантированно выводит на передний план."""
+        """Находит главное окно 1С по заголовку, максимизирует и выводит на передний план."""
         print(f"[1С:Windows] Поиск окна 1С по маске '{self.cfg.onec_window_regex}'...")
         elements = self.pywinauto.findwindows.find_elements(
             title_re=self.cfg.onec_window_regex
@@ -235,11 +262,9 @@ class WindowsOneCExporter(BaseOneCExporter):
         self.app = self.Application(backend="uia").connect(handle=hwnd)
         self.main_win = self.app.window(handle=hwnd)
 
-        # Восстановление из свернутого состояния
-        if self.win32gui.IsIconic(hwnd):
-            self.win32gui.ShowWindow(hwnd, self.win32con.SW_RESTORE)
-        else:
-            self.win32gui.ShowWindow(hwnd, self.win32con.SW_SHOW)
+        # Разворачиваем окно на весь экран для предсказуемых координат
+        self.win32gui.ShowWindow(hwnd, self.win32con.SW_MAXIMIZE)
+        time.sleep(0.3)
 
         # Обход ограничения Windows SetForegroundWindow Lock через симуляцию ALT
         self._send_vk(self.win32con.VK_MENU, down=True)
@@ -252,313 +277,360 @@ class WindowsOneCExporter(BaseOneCExporter):
             pass
 
         time.sleep(0.4)
-        # Сброс возможного фокуса меню после нажатия ALT
+        # Сброс возможного фокуса системного меню после нажатия ALT
         self._hotkey_esc()
         time.sleep(0.3)
-        print("[1С:Windows] ✓ Окно 1С успешно активировано и готово к командам.")
+        print("[1С:Windows] ✓ Окно 1С успешно максимизировано и активировано.")
 
     # ---------------------------------------------------------------------
     # Прямой переход по ссылке 1С (Shift + F11 / e1cib)
     # ---------------------------------------------------------------------
     def _open_by_link(self, url: str, section_title: str) -> None:
         """
-        Мгновенно открывает любой раздел 1С по постоянной ссылке e1cib через Shift + F11.
-        ПОЛНОСТЬЮ исключает ошибки меню «Избранное», смену порядка и человеческий фактор.
+        Мгновенно открывает любой раздел 1С по ссылке e1cib через Shift + F11.
+        Использует кнопку «Вставить из буфера», что исключает проблемы раскладки.
         """
         print(f"\n[1С:Windows] Переход по прямой ссылке в «{section_title}»...")
         print(f"             URL: {url}")
 
-        # Сбрасываем возможные зависшие контекстные меню или диалоги
+        # Сбрасываем контекстные меню или диалоги
         self._hotkey_esc()
         time.sleep(0.3)
 
-        # 1. Вызов окна «Переход по ссылке» через Shift + F11
+        # 1. Помещаем URL в буфер обмена
+        set_clipboard(url)
+        time.sleep(0.1)
+
+        # 2. Вызываем окно «Переход по ссылке» через Shift + F11
         self._hotkey_shift_f11()
-        time.sleep(0.8)
+        time.sleep(1.0)
 
-        # 2. Вставка ссылки в строку ввода диалога
-        self._select_all_and_paste(url)
-        time.sleep(0.3)
+        # 3. Ищем окно «Переход по ссылке»
+        link_dlg = None
+        for _ in range(5):
+            try:
+                for w in self.app.windows():
+                    title = (w.element_info.name or w.window_text() or "").strip()
+                    if "переход по ссылке" in title.lower():
+                        link_dlg = w
+                        break
+            except Exception:
+                pass
+            if link_dlg:
+                break
+            time.sleep(0.3)
 
-        # 3. Нажатие Enter для перехода
-        self._hotkey_enter()
+        # 4. Нажимаем кнопку «Вставить из буфера»
+        pasted = False
+        if link_dlg:
+            try:
+                for btn in link_dlg.descendants(control_type="Button"):
+                    txt = (btn.element_info.name or btn.window_text() or "").strip().lower()
+                    if "вставить из буфера" in txt:
+                        btn.click_input()
+                        pasted = True
+                        time.sleep(0.3)
+                        break
+            except Exception as e:
+                logger.debug("Клик по 'Вставить из буфера': %s", e)
+
+        if not pasted:
+            # Горячая клавиша кнопки «Вставить из буфера» (Alt + В)
+            self._send_hotkey(self.win32con.VK_MENU, 0x44)  # Alt + D (В)
+            time.sleep(0.2)
+            self._paste_clipboard()
+            time.sleep(0.2)
+
+        # 5. Нажимаем кнопку «Перейти»
+        transitioned = False
+        if link_dlg:
+            try:
+                for btn in link_dlg.descendants(control_type="Button"):
+                    txt = (btn.element_info.name or btn.window_text() or "").strip().lower()
+                    if txt == "перейти":
+                        btn.click_input()
+                        transitioned = True
+                        time.sleep(0.5)
+                        break
+            except Exception:
+                pass
+
+        if not transitioned:
+            self._hotkey_enter()
+
         # Ожидаем отрисовки целевой формы
-        time.sleep(2.5)
-
+        time.sleep(3.0)
         print(f"[1С:Windows] ✓ Раздел «{section_title}» успешно открыт по прямой ссылке.")
 
     # ---------------------------------------------------------------------
-    # Установка периода для списков (плашка периода или меню таблицы Еще)
+    # Раздел 1: «Маршрутный лист» (фильтр отгрузки и кнопка Вывести список)
     # ---------------------------------------------------------------------
-    def _set_list_period(self, date_from: datetime, date_to: datetime) -> None:
+    def _set_marshrut_period(self, date_from: datetime, date_to: datetime) -> None:
         """
-        Устанавливает период в динамическом списке документов:
-        1. Кликает по плашке периода под тулбаром (напр. '31.10.2026 - 03.11.2026').
-        2. Если плашки нет — открывает через меню таблицы «Еще ▾» или контекстное меню (Shift+F10).
-        3. Заполняет даты в диалоге периода.
+        Устанавливает фильтр дат отгрузки в шапке списка «Маршрутный лист»:
+        Строка 1: «Дата отгрузки: [Больше или равно] [03.10.2026 0:00:00]»
+        Строка 2: «Дата отгрузки: [Меньше или равно] [05.11.2026 0:00:00]»
         """
         d_from_str = date_from.strftime("%d.%m.%Y")
         d_to_str = date_to.strftime("%d.%m.%Y")
-        print(f"[1С:Windows] Установка периода списка: с {d_from_str} по {d_to_str}...")
+        print(f"[1С:Windows] Установка дат в «Маршрутный лист»: с {d_from_str} по {d_to_str}...")
 
-        # Шаг 1: Пробуем кликнуть по плашке периода (напр. '31.10.2026 - 03.11.2026')
-        clicked_chip = False
+        # Поиск Edit полей в фильтре шапки
+        edits_found: List = []
+        try:
+            for w in self.app.windows():
+                for el in w.descendants(control_type="Edit"):
+                    try:
+                        r = el.rectangle()
+                        # Поля фильтра дат находятся в области y: 90..180, x: 400..750
+                        if 90 <= r.top <= 180 and 400 <= r.left <= 750:
+                            edits_found.append(el)
+                    except Exception:
+                        continue
+        except Exception as e:
+            logger.debug("Поиск Edit полей Маршрутного листа: %s", e)
+
+        # Сортируем поля сверху вниз (edits[0] — Больше или равно, edits[1] — Меньше или равно)
+        edits_found.sort(key=lambda x: x.rectangle().top)
+
+        if len(edits_found) >= 2:
+            print("[1С:Windows] Заполнение полей фильтра отгрузки через элементы интерфейса...")
+            edits_found[0].click_input()
+            time.sleep(0.15)
+            self._select_all_and_paste(d_from_str)
+            time.sleep(0.15)
+
+            edits_found[1].click_input()
+            time.sleep(0.15)
+            self._select_all_and_paste(d_to_str)
+            time.sleep(0.15)
+        else:
+            print("[1С:Windows] Использование точных экранных координат фильтра дат...")
+            # Поле 1 (Больше или равно): x ~ 580, y ~ 122
+            self.pywinauto.mouse.click(coords=(580, 122))
+            time.sleep(0.15)
+            self._select_all_and_paste(d_from_str)
+            time.sleep(0.15)
+
+            # Поле 2 (Меньше или равно): x ~ 580, y ~ 153
+            self.pywinauto.mouse.click(coords=(580, 153))
+            time.sleep(0.15)
+            self._select_all_and_paste(d_to_str)
+            time.sleep(0.15)
+
+        # Обновление списка (Enter или кнопка Обновить)
+        self._hotkey_enter()
+        time.sleep(2.0)
+        print(f"[1С:Windows] ✓ Фильтр «Маршрутный лист» установлен: {d_from_str} - {d_to_str}.")
+
+    def _export_marshrut_list(self, target_filepath: str) -> None:
+        """
+        Выгружает открытый «Маршрутный лист» через прямую кнопку панели «Вывести список...»
+        """
+        print(f"[1С:Windows] Выгрузка «Маршрутный лист» в «{target_filepath}»...")
+
+        # 1. Клик по кнопке «Вывести список...» (на панели тулбара)
+        btn_clicked = False
+        try:
+            for w in self.app.windows():
+                for btn in w.descendants(control_type="Button"):
+                    txt = (btn.element_info.name or btn.window_text() or "").strip().lower()
+                    if "вывести список" in txt:
+                        btn.click_input()
+                        btn_clicked = True
+                        time.sleep(1.0)
+                        break
+                if btn_clicked:
+                    break
+        except Exception:
+            pass
+
+        if not btn_clicked:
+            # Кнопка «Вывести список...» на панели инструментов находится по coords ~ (1010, 88)
+            print("[1С:Windows] Клик по кнопке «Вывести список...» по координатам тулбара...")
+            self.pywinauto.mouse.click(coords=(1010, 88))
+            time.sleep(1.2)
+
+        # 2. Подтверждение колонок в диалоге «Вывести список» (нажать ОК / Enter)
+        print("[1С:Windows] Подтверждение диалога «Вывести список» (ОК)...")
+        self._confirm_export_dialog()
+
+        # 3. Сохранение файла и закрытие вкладки «Информация по МЛ»
+        self._save_in_dialog(target_filepath)
+
+    # ---------------------------------------------------------------------
+    # Раздел 2: «Электронные транспортные накладные»
+    # ---------------------------------------------------------------------
+    def _set_etrn_period(self, date_from: datetime, date_to: datetime) -> None:
+        """
+        Устанавливает период для списка ЭТРН через диалог «Выберите период».
+        Диалог открывается через правое меню «Еще ▾» ➔ «Установить период...» или плашку периода.
+        """
+        d_from_str = date_from.strftime("%d.%m.%Y")
+        d_to_str = date_to.strftime("%d.%m.%Y")
+        print(f"[1С:Windows] Установка периода в «ЭТРН»: с {d_from_str} по {d_to_str}...")
+
+        # 1. Пробуем кликнуть по плашке периода под «Создать»
+        opened_dialog = False
         try:
             for w in self.app.windows():
                 for el in w.descendants():
                     txt = (el.element_info.name or el.window_text() or "").strip()
                     if re.search(r"\d{2}\.\d{2}\.\d{4}\s*-\s*\d{2}\.\d{2}\.\d{4}", txt):
                         r = el.rectangle()
-                        if 50 <= r.top <= 200:
-                            print(f"[1С:Windows] Найдена плашка периода «{txt}». Кликаем...")
-                            self.pywinauto.mouse.click(coords=(r.mid_point().x, r.mid_point().y))
-                            clicked_chip = True
+                        if 50 <= r.top <= 140:
+                            el.click_input()
+                            opened_dialog = True
                             time.sleep(1.2)
                             break
-                if clicked_chip:
+                if opened_dialog:
                     break
-        except Exception as e:
-            logger.debug("Поиск плашки периода: %s", e)
+        except Exception:
+            pass
 
-        # Шаг 2: Если плашка не найдена — открываем через меню таблицы «Еще ▾»
-        if not clicked_chip:
-            print("[1С:Windows] Поиск кнопки «Еще ▾» на панели таблицы...")
-            table_more_btn = None
-            try:
-                for w in self.app.windows():
-                    for btn in w.descendants(control_type="Button"):
-                        txt = (btn.element_info.name or btn.window_text() or "").strip().lower()
-                        if txt in ("еще", "ещё"):
-                            r = btn.rectangle()
-                            # Кнопка Еще таблицы списка находится в правой части тулбара (x > 1400)
-                            if r.left > 1400 and 50 <= r.top <= 130:
-                                table_more_btn = btn
-                                break
-                    if table_more_btn:
+        # 2. Если плашка не найдена — открываем через меню таблицы «Еще ▾» (справа)
+        if not opened_dialog:
+            print("[1С:Windows] Открытие диалога периода через меню «Еще ▾»...")
+            self._click_table_more_button()
+            time.sleep(0.6)
+            for w in self.app.windows():
+                for el in w.descendants():
+                    txt = (el.element_info.name or el.window_text() or "").strip().lower()
+                    if "установить период" in txt:
+                        el.click_input()
+                        opened_dialog = True
+                        time.sleep(1.2)
                         break
-            except Exception:
-                pass
+                if opened_dialog:
+                    break
 
-            if table_more_btn:
-                r = table_more_btn.rectangle()
-                self.pywinauto.mouse.click(coords=(r.mid_point().x, r.mid_point().y))
-                time.sleep(0.8)
-                for w in self.app.windows():
-                    for el in w.descendants():
-                        txt = (el.element_info.name or el.window_text() or "").strip().lower()
-                        if "установить период" in txt:
-                            el.click_input()
-                            time.sleep(1.2)
-                            break
-            else:
-                # Fallback: вызов контекстного меню списка по правой кнопке мыши
-                print("[1С:Windows] Вызов контекстного меню списка (правый клик)...")
-                self.pywinauto.mouse.right_click(coords=(400, 250))
-                time.sleep(0.8)
-                for w in self.app.windows():
-                    for el in w.descendants():
-                        txt = (el.element_info.name or el.window_text() or "").strip().lower()
-                        if "установить период" in txt:
-                            el.click_input()
-                            time.sleep(1.2)
-                            break
+        # 3. Заполнение полей даты в диалоге «Выберите период»
+        print("[1С:Windows] Заполнение дат в диалоге «Выберите период»...")
+        # При открытии диалога фокус уже стоит на первом поле даты
+        self._select_all_and_paste(d_from_str)
+        self._hotkey_tab()
+        time.sleep(0.2)
+        self._select_all_and_paste(d_to_str)
+        time.sleep(0.2)
 
-        # Шаг 3: Заполнение полей в диалоге периода
-        print("[1С:Windows] Заполнение дат в диалоге периода...")
-        filled = False
+        # Нажимаем кнопку «Выбрать» (или Enter)
+        selected = False
         try:
             for w in self.app.windows():
                 title = (w.element_info.name or w.window_text() or "").strip().lower()
-                if "период" in title or "выбор" in title or "настройка" in title or "установка" in title:
-                    edits = w.descendants(control_type="Edit")
-                    if len(edits) >= 2:
-                        edits[0].click_input()
-                        time.sleep(0.15)
-                        self._select_all_and_paste(d_from_str)
-                        time.sleep(0.15)
-                        edits[1].click_input()
-                        time.sleep(0.15)
-                        self._select_all_and_paste(d_to_str)
-                        time.sleep(0.15)
-                        self._hotkey_enter()
-                        filled = True
-                        time.sleep(2.0)
-                        break
-        except Exception as e:
-            logger.debug("Заполнение диалога периода: %s", e)
-
-        if not filled:
-            # Универсальный ввод: первое поле -> Tab -> второе поле -> Enter
-            self._select_all_and_paste(d_from_str)
-            self._hotkey_tab()
-            time.sleep(0.2)
-            self._select_all_and_paste(d_to_str)
-            time.sleep(0.2)
-            self._hotkey_enter()
-            time.sleep(2.0)
-
-        print(f"[1С:Windows] ✓ Период успешно установлен: {d_from_str} - {d_to_str}.")
-
-    # ---------------------------------------------------------------------
-    # Выгрузка списка в Excel (Еще -> Вывести список... -> Ctrl+S)
-    # ---------------------------------------------------------------------
-    def _export_list_to_excel(self, target_filepath: str) -> None:
-        """
-        Выгружает открытый список 1С в Excel файл:
-        1. Клик по кнопке «Еще» на панели таблицы списка (x > 1400) или правый клик по строкам.
-        2. Выбор «Вывести список...» ➔ [ОК] в диалоге колонок.
-        3. Ctrl+S в появившемся табличном документе ➔ ввод пути ➔ Сохранить.
-        4. Закрытие вкладки табличного документа (ТОЛЬКО после подтверждения записи файла!).
-        """
-        print(f"[1С:Windows] Выгрузка списка в «{target_filepath}»...")
-        if os.path.exists(target_filepath):
-            try:
-                os.remove(target_filepath)
-            except Exception:
-                pass
-
-        # 1. Поиск кнопки «Еще ▾» на тулбаре списка (справа от поиска)
-        table_more_btn = None
-        for w in self.app.windows():
-            for btn in w.descendants(control_type="Button"):
-                try:
-                    txt = (btn.element_info.name or btn.window_text() or "").strip().lower()
-                    if txt in ("еще", "ещё"):
-                        r = btn.rectangle()
-                        if r.left > 1400 and 50 <= r.top <= 130:
-                            table_more_btn = btn
+                if "период" in title:
+                    for btn in w.descendants(control_type="Button"):
+                        txt = (btn.element_info.name or btn.window_text() or "").strip().lower()
+                        if txt == "выбрать":
+                            btn.click_input()
+                            selected = True
+                            time.sleep(1.5)
                             break
-                except Exception:
-                    continue
-            if table_more_btn:
-                break
+                if selected:
+                    break
+        except Exception:
+            pass
 
-        if table_more_btn:
-            print("[1С:Windows] Клик по кнопке «Еще ▾» на панели таблицы списка...")
-            r = table_more_btn.rectangle()
-            self.pywinauto.mouse.click(coords=(r.mid_point().x, r.mid_point().y))
-            time.sleep(0.8)
-        else:
-            print("[1С:Windows] Клик правой кнопкой мыши по таблице для вызова меню...")
-            self.pywinauto.mouse.right_click(coords=(400, 250))
-            time.sleep(0.8)
+        if not selected:
+            self._hotkey_enter()
+            time.sleep(1.5)
 
-        # 2. Поиск пункта «Вывести список...»
-        export_item_clicked = False
+        print(f"[1С:Windows] ✓ Период списка «ЭТРН» успешно установлен: {d_from_str} - {d_to_str}.")
+
+    def _export_etrn_list(self, target_filepath: str) -> None:
+        """
+        Выгружает открытый список «ЭТРН» через меню таблицы «Еще ▾» ➔ «Вывести список...»
+        """
+        print(f"[1С:Windows] Выгрузка «ЭТРН» в «{target_filepath}»...")
+
+        # 1. Открытие меню «Еще ▾» таблицы списка
+        self._click_table_more_button()
+        time.sleep(0.6)
+
+        # 2. Поиск и клик пункта «Вывести список...»
+        item_clicked = False
         for w in self.app.windows():
             for el in w.descendants():
                 try:
                     txt = (el.element_info.name or el.window_text() or "").strip().lower()
                     if "вывести список" in txt:
                         el.click_input()
-                        export_item_clicked = True
-                        time.sleep(1.2)
+                        item_clicked = True
+                        time.sleep(1.0)
                         break
                 except Exception:
                     continue
-            if export_item_clicked:
+            if item_clicked:
                 break
 
-        if not export_item_clicked:
-            raise RuntimeError("Не удалось найти пункт «Вывести список...» в меню таблицы 1С!")
-
-        # 3. В модальном окне «Вывести список» нажимаем Enter (ОК)
-        print("[1С:Windows] Подтверждение колонок для вывода списка (ОК)...")
-        time.sleep(0.6)
-        self._hotkey_enter()
-        # Ожидаем формирования табличного документа
-        time.sleep(3.5)
-
-        # 4. Сохраняем табличный документ по Ctrl+S
-        print("[1С:Windows] Сохранение табличного документа через Ctrl+S...")
-        self._hotkey_ctrl_s()
-        time.sleep(1.5)
-
-        # 5. Обработка диалога Windows «Сохранение» / «Сохранить как»
-        print(f"[1С:Windows] Ввод пути сохранения: {target_filepath}...")
-        self._select_all_and_paste(target_filepath)
-        time.sleep(0.4)
-        self._hotkey_enter()
-        time.sleep(1.0)
-        # Подтверждение перезаписи (если окно спросит "Заменить существующий?")
-        self._hotkey_enter()
-
-        # 6. Ожидание физической записи файла на диск (до 15 секунд)
-        file_ready = False
-        for _ in range(15):
-            if os.path.exists(target_filepath) and os.path.getsize(target_filepath) > 0:
-                file_ready = True
-                break
+        if not item_clicked:
+            # Fallback: координатный клик пункта меню
+            self.pywinauto.mouse.click(coords=(1600, 576))
             time.sleep(1.0)
 
-        if not file_ready:
-            raise RuntimeError(
-                f"Файл {target_filepath} не был сохранен на рабочий стол! "
-                "Проверьте права на запись или активность диалога сохранения."
-            )
+        # 3. Подтверждение колонок в диалоге «Вывести список» (ОК)
+        self._confirm_export_dialog()
 
-        print(f"[1С:Windows] ✓ Таблица успешно сохранена: {target_filepath}")
-
-        # 7. ЗАКРЫВАЕМ СФОРМИРОВАННУЮ ВКЛАДКУ ТАБЛИЧНОГО ДОКУМЕНТА (ТОЛЬКО ПОСЛЕ УСПЕХА!)
-        print("[1С:Windows] Закрытие сформированной вкладки табличного документа (Ctrl+F4)...")
-        self._hotkey_ctrl_f4()
-        time.sleep(1.2)
+        # 4. Сохранение файла и закрытие сформированной вкладки «Список»
+        self._save_in_dialog(target_filepath)
 
     # ---------------------------------------------------------------------
-    # Выгрузка отчета «Контроль подписания перевозчиков по ЭТРН»
+    # Раздел 3: Отчет «Контроль подписания перевозчиков по ЭТРН»
     # ---------------------------------------------------------------------
-    def _export_report_to_excel(
+    def _export_percent_report(
         self,
         date_from: datetime,
         date_to: datetime,
         target_filepath: str,
     ) -> None:
         """
-        Заполняет даты в шапке отчета «Контроль подписания...», формирует его
-        и сохраняет в Excel файл.
+        Заполняет даты в шапке отчета «Контроль подписания...», формирует его (F5)
+        и сохраняет в Excel файл 'Процент.xlsx'.
         """
         d_from_str = date_from.strftime("%d.%m.%Y")
         d_to_str = date_to.strftime("%d.%m.%Y")
         print(f"\n[1С:Windows] Настройка отчета «{self.cfg.title_percent}»...")
         print(f"[1С:Windows] Заполнение дат в шапке отчета: с {d_from_str} по {d_to_str}...")
 
-        if os.path.exists(target_filepath):
-            try:
-                os.remove(target_filepath)
-            except Exception:
-                pass
-
-        # Ищем поля ввода дат в шапке отчета
+        # Поиск Edit полей в шапке отчета
+        edits: List = []
         try:
-            edits = []
             for w in self.app.windows():
                 for el in w.descendants(control_type="Edit"):
                     try:
                         r = el.rectangle()
-                        if 50 <= r.top <= 200:
+                        if 50 <= r.top <= 120 and 300 <= r.left <= 600:
                             edits.append(el)
                     except Exception:
                         continue
-            
-            if len(edits) >= 2:
-                edits[0].click_input()
-                time.sleep(0.15)
-                self._select_all_and_paste(d_from_str)
-                time.sleep(0.15)
+        except Exception:
+            pass
 
-                edits[1].click_input()
-                time.sleep(0.15)
-                self._select_all_and_paste(d_to_str)
-                time.sleep(0.15)
-            else:
-                self._select_all_and_paste(d_from_str)
-                self._hotkey_tab()
-                self._select_all_and_paste(d_to_str)
-        except Exception as e:
-            logger.debug("Заполнение дат отчета: %s", e)
+        edits.sort(key=lambda x: x.rectangle().left)
 
-        # Нажимаем кнопку «Сформировать»
-        print("[1С:Windows] Нажатие кнопки «Сформировать»...")
+        if len(edits) >= 2:
+            edits[0].click_input()
+            time.sleep(0.15)
+            self._select_all_and_paste(d_from_str)
+            time.sleep(0.15)
+
+            edits[1].click_input()
+            time.sleep(0.15)
+            self._select_all_and_paste(d_to_str)
+            time.sleep(0.15)
+        else:
+            # Координатный ввод в шапке отчета: первое поле ~ (350, 80), второе ~ (450, 80)
+            self.pywinauto.mouse.click(coords=(350, 80))
+            time.sleep(0.15)
+            self._select_all_and_paste(d_from_str)
+            time.sleep(0.15)
+            self.pywinauto.mouse.click(coords=(450, 80))
+            time.sleep(0.15)
+            self._select_all_and_paste(d_to_str)
+            time.sleep(0.15)
+
+        # Нажатие кнопки «Сформировать»
+        print("[1С:Windows] Запуск формирования отчета (F5)...")
         formed = False
         try:
             for w in self.app.windows():
@@ -574,42 +646,115 @@ class WindowsOneCExporter(BaseOneCExporter):
             pass
 
         if not formed:
-            # Стандартная клавиша формирования отчета в 1С (F5)
-            self._send_hotkey(self.win32con.VK_F5)
+            self._hotkey_f5()
 
         print(f"[1С:Windows] Ожидание формирования отчета (до {self.cfg.report_gen_timeout} сек)...")
-        time.sleep(7.0)
+        time.sleep(8.0)
 
-        # Сохраняем сформированный отчет через Ctrl+S
-        print(f"[1С:Windows] Сохранение отчета в «{target_filepath}» (Ctrl+S)...")
+        # Сохранение отчета и закрытие его вкладки
+        self._save_in_dialog(target_filepath)
+
+    # ---------------------------------------------------------------------
+    # Вспомогательные методы выгрузки и сохранения
+    # ---------------------------------------------------------------------
+    def _click_table_more_button(self) -> None:
+        """Кликает по кнопке «Еще ▾» на панели списка документов (в правой части тулбара)."""
+        clicked = False
+        for w in self.app.windows():
+            for btn in w.descendants(control_type="Button"):
+                try:
+                    txt = (btn.element_info.name or btn.window_text() or "").strip().lower()
+                    if txt in ("еще", "ещё"):
+                        r = btn.rectangle()
+                        if r.left > 1400 and 50 <= r.top <= 120:
+                            btn.click_input()
+                            clicked = True
+                            break
+                except Exception:
+                    continue
+            if clicked:
+                break
+
+        if not clicked:
+            # Координатный клик кнопки Еще ~ (1860, 80)
+            self.pywinauto.mouse.click(coords=(1860, 80))
+
+    def _confirm_export_dialog(self) -> None:
+        """Подтверждает модальное окно «Вывести список» (нажимает кнопку ОК / Enter)."""
+        time.sleep(0.8)
+        confirmed = False
+        try:
+            for w in self.app.windows():
+                title = (w.element_info.name or w.window_text() or "").strip().lower()
+                if "вывести список" in title:
+                    for btn in w.descendants(control_type="Button"):
+                        txt = (btn.element_info.name or btn.window_text() or "").strip().lower()
+                        if txt == "ок":
+                            btn.click_input()
+                            confirmed = True
+                            break
+                if confirmed:
+                    break
+        except Exception:
+            pass
+
+        if not confirmed:
+            self._hotkey_enter()
+
+        # Ожидаем отрисовки сформированного табличного документа
+        time.sleep(3.0)
+
+    def _save_in_dialog(self, target_filepath: str) -> None:
+        """
+        Сохраняет сформированный табличный документ в Excel по Ctrl+S.
+        Проверяет появление файла на диске и только после этого закрывает вкладку (Ctrl+F4).
+        """
+        print(f"[1С:Windows] Сохранение документа в «{target_filepath}» через Ctrl+S...")
+
+        # Удаляем предыдущий файл, чтобы гарантировать проверку нового
+        if os.path.exists(target_filepath):
+            try:
+                os.remove(target_filepath)
+            except Exception:
+                pass
+
+        # Вызов диалога Windows «Сохранение»
         self._hotkey_ctrl_s()
         time.sleep(1.5)
 
+        # Ввод пути сохранения в диалог
         self._select_all_and_paste(target_filepath)
         time.sleep(0.4)
         self._hotkey_enter()
         time.sleep(1.0)
+
+        # Проверка диалога подтверждения перезаписи ("Заменить существующий?")
         self._hotkey_enter()
 
-        # Ожидание сохранения
+        # Ожидание физической записи файла на диск (до 25 секунд)
         file_ready = False
-        for _ in range(15):
+        for _ in range(25):
             if os.path.exists(target_filepath) and os.path.getsize(target_filepath) > 0:
                 file_ready = True
                 break
             time.sleep(1.0)
 
         if not file_ready:
-            raise RuntimeError(f"Файл отчета {target_filepath} не был записан на диск!")
+            raise RuntimeError(
+                f"Файл {target_filepath} не был сохранен на рабочий стол!\n"
+                "Проверьте права на запись или открытые диалоговые окна 1С."
+            )
 
-        print(f"[1С:Windows] ✓ Отчет успешно сохранен: {target_filepath}")
+        print(f"[1С:Windows] ✓ Таблица успешно сохранена на рабочий стол: {target_filepath}")
 
-        # Закрываем вкладку отчета
+        # ЗАКРЫТИЕ СФОРМИРОВАННОЙ ВКЛАДКИ (ТОЛЬКО ПОСЛЕ УСПЕШНОГО СОХРАНЕНИЯ!)
+        print("[1С:Windows] Закрытие сформированной вкладки (Ctrl+F4)...")
+        time.sleep(0.5)
         self._hotkey_ctrl_f4()
-        time.sleep(1.0)
+        time.sleep(1.2)
 
     # ---------------------------------------------------------------------
-    # Полный цикл выгрузки всех 3 таблиц по прямым e1cib ссылкам
+    # Полный цикл выгрузки всех 3 таблиц
     # ---------------------------------------------------------------------
     def export_all(
         self,
@@ -620,22 +765,24 @@ class WindowsOneCExporter(BaseOneCExporter):
         print(" ЗАПУСК ВЫГРУЗКИ ТРЕХ ТАБЛИЦ ИЗ 1С:ПРЕДПРИЯТИЕ (e1cib)")
         print("=" * 70)
 
-        # 1. Активация 1С
+        # 1. Активация и разворачивание окна 1С
         self._find_and_activate_1c()
 
         # 2. Выгрузка «Маршрутный лист» -> Модель расчетов.xlsx
         self._open_by_link(self.cfg.url_marshrut, self.cfg.title_marshrut)
-        self._set_list_period(marshrut_period[0], marshrut_period[1])
-        self._export_list_to_excel(self.cfg.model_file)
+        self._set_marshrut_period(marshrut_period[0], marshrut_period[1])
+        self._export_marshrut_list(self.cfg.model_file)
 
         # 3. Выгрузка «Электронные транспортные накладные» -> ЭТРН 1с.xlsx
         self._open_by_link(self.cfg.url_etrn, self.cfg.title_etrn)
-        self._set_list_period(etrn_period[0], etrn_period[1])
-        self._export_list_to_excel(self.cfg.etrn_file)
+        self._set_etrn_period(etrn_period[0], etrn_period[1])
+        self._export_etrn_list(self.cfg.etrn_file)
 
         # 4. Выгрузка «Контроль подписания перевозчиков по ЭТРН» -> Процент.xlsx
         self._open_by_link(self.cfg.url_percent, self.cfg.title_percent)
-        self._export_report_to_excel(etrn_period[0], etrn_period[1], self.cfg.percent_file)
+        self._export_percent_report(
+            etrn_period[0], etrn_period[1], self.cfg.percent_file
+        )
 
         print("\n" + "=" * 70)
         print(" ✓ ВЫГРУЗКА ВСЕХ 3 ТАБЛИЦ ИЗ 1С УСПЕШНО ЗАВЕРШЕНА!")
@@ -657,6 +804,8 @@ def get_onec_exporter(cfg: Optional[Config] = None) -> BaseOneCExporter:
         try:
             return WindowsOneCExporter(cfg)
         except Exception as e:
-            logger.warning("Ошибка инициализации WindowsOneCExporter: %s. Включаем симулятор.", e)
+            logger.warning(
+                "Ошибка инициализации WindowsOneCExporter: %s. Включаем симулятор.", e
+            )
             return MockOneCExporter(cfg)
     return MockOneCExporter(cfg)
