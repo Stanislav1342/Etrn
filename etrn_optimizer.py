@@ -92,10 +92,26 @@ def process_and_style_etrn(input_filepath, model_filepath, percent_filepath, out
     if ext.lower() == '.csv':
         df = pd.read_csv(input_filepath)
     else:
-        df = pd.read_excel(input_filepath)
+        try:
+            df = pd.read_excel(input_filepath, engine='openpyxl')
+        except Exception as e:
+            try:
+                with open(input_filepath, 'rb') as f:
+                    sig = f.read(8)
+                if not sig.startswith(b'PK'):
+                    raise ValueError(
+                        f"Файл '{input_filepath}' сохранен 1С не как XLSX (сигнатура: {sig}). "
+                        "Возможно, 1С сохранила его в формате MXL. Перезапустите выгрузку."
+                    ) from e
+            except Exception:
+                pass
+            raise e
 
     print(f"Подтягивание данных из файла: {model_filepath}...")
-    model_df = pd.read_excel(model_filepath)
+    try:
+        model_df = pd.read_excel(model_filepath, engine='openpyxl')
+    except Exception as e:
+        raise ValueError(f"Не удалось прочитать '{model_filepath}' как Excel: {e}") from e
 
     df = df[df['Состояние ЭДО'].astype(str).str.strip() != 'Завершен'].copy()
 
@@ -158,7 +174,10 @@ def process_and_style_etrn(input_filepath, model_filepath, percent_filepath, out
     # =================================================================
     print(f"Подтягивание данных из файла: {percent_filepath}...")
     # Читаем без шапки, так как в 1С шапка многоуровневая
-    percent_df = pd.read_excel(percent_filepath, header=None)
+    try:
+        percent_df = pd.read_excel(percent_filepath, header=None, engine='openpyxl')
+    except Exception as e:
+        raise ValueError(f"Не удалось прочитать '{percent_filepath}' как Excel: {e}") from e
     
     # Динамически ищем колонку "Среднее время (мин)" (нам нужна самая первая)
     time_col_idx = 2 

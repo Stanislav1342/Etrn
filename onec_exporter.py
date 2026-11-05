@@ -551,36 +551,24 @@ class WindowsOneCExporter(BaseOneCExporter):
         print("[1С:Windows] ✓ Включена колонка: «Водитель»")
         time.sleep(0.1)
 
-        # Переход к Строке 10: Перевозчик (5 шагов вниз)
+        # Переход к Строке 10: Перевозчик (5 шагов вниз: 5 -> 10)
         for _ in range(5):
             self._send_hotkey(self.win32con.VK_DOWN)
-            time.sleep(0.05)
+            time.sleep(0.06)
         self._send_hotkey(self.win32con.VK_SPACE)
         print("[1С:Windows] ✓ Включена колонка: «Перевозчик»")
         time.sleep(0.1)
 
-        # Переход к строке «Модель расчетов» (в 1С нажатие буквы 'м' мгновенно переходит на «Модель расчетов»)
-        try:
-            self.win32api.LoadKeyboardLayout("00000419", self.win32con.KLF_ACTIVATE)
-            # Клавиша буквы М (VK код 0x56)
-            self._send_hotkey(0x56)
-            time.sleep(0.2)
-            self._send_hotkey(self.win32con.VK_SPACE)
-            print("[1С:Windows] ✓ Включена колонка: «Модель расчетов»")
-            time.sleep(0.1)
-        except Exception as e:
-            logger.debug("Клавиатурный выбор 'Модель расчетов': %s", e)
-
-        # Дополнительно: проверка через UIA (если элементы присутствуют в дереве)
-        try:
-            for el in dlg.descendants():
-                txt = (el.element_info.name or el.window_text() or "").strip().lower()
-                if "модель" in txt:
-                    el_r = el.rectangle()
-                    self.pywinauto.mouse.click(coords=(r.left + 22, (el_r.top + el_r.bottom) // 2))
-                    break
-        except Exception:
-            pass
+        # Переход к Строке 17: Модель расчетов (ровно 7 шагов вниз от Перевозчик:
+        # 11: Количество заказов, 12: Количество мест, 13: Количество паллет,
+        # 14: Количество пунктов назначения, 15: Направление, 16: Переходники, 17: Модель расчетов)
+        print("[1С:Windows] Прокрутка списка к колонке «Модель расчетов» (7 шагов вниз)...")
+        for _ in range(7):
+            self._send_hotkey(self.win32con.VK_DOWN)
+            time.sleep(0.08)
+        self._send_hotkey(self.win32con.VK_SPACE)
+        print("[1С:Windows] ✓ Включена колонка: «Модель расчетов»")
+        time.sleep(0.1)
 
         # Шаг 3: Нажатие кнопки «ОК»
         print("[1С:Windows] Подтверждение настроенных колонок (ОК)...")
@@ -930,8 +918,8 @@ class WindowsOneCExporter(BaseOneCExporter):
         print(f"[1С:Windows] Ожидание формирования отчета (до {self.cfg.report_gen_timeout} сек)...")
         time.sleep(8.0)
 
-        # Сохранение отчета и закрытие его вкладки
-        self._save_in_dialog(target_filepath)
+        # Сохранение отчета (вкладку самого отчета НЕ закрываем, чтобы не закрывать разделы пользователя)
+        self._save_in_dialog(target_filepath, close_tab_after=False)
 
     # ---------------------------------------------------------------------
     # Вспомогательные методы выгрузки и сохранения
@@ -955,10 +943,11 @@ class WindowsOneCExporter(BaseOneCExporter):
             # Координатный клик кнопки Еще ~ (1860, 80)
             self.pywinauto.mouse.click(coords=(1860, 80))
 
-    def _save_in_dialog(self, target_filepath: str) -> None:
+    def _save_in_dialog(self, target_filepath: str, close_tab_after: bool = True) -> None:
         """
         Сохраняет сформированный табличный документ в Excel по Ctrl+S.
-        Проверяет появление файла на диске и только после этого закрывает вкладку (Ctrl+F4).
+        Гарантирует выбор типа файла «Лист Excel (*.xlsx)» в диалоге Windows Save As.
+        При close_tab_after=True закрывает только временную сформированную вкладку (Ctrl+F4).
         """
         print(f"[1С:Windows] Сохранение документа в «{target_filepath}» через Ctrl+S...")
 
@@ -973,12 +962,62 @@ class WindowsOneCExporter(BaseOneCExporter):
         self._hotkey_ctrl_s()
         time.sleep(1.5)
 
-        # Поиск диалога сохранения через надежный поиск
+        # Поиск диалога сохранения через надежный системный поиск
         save_dlg = self._find_dialog("сохран", timeout=5.0)
         if not save_dlg:
             save_dlg = self._find_dialog("save", timeout=1.0)
 
-        # Ввод пути сохранения в диалог
+        # 1. Переключение «Тип файла:» на «Лист Excel (*.xlsx)»
+        switched_type = False
+        if save_dlg:
+            try:
+                for cb in save_dlg.descendants(control_type="ComboBox"):
+                    txt = (cb.element_info.name or cb.window_text() or "").lower()
+                    auto_id = getattr(cb.element_info, "automation_id", "")
+                    if "тип" in txt or "type" in txt or auto_id == "FileTypeControlHost":
+                        val = (cb.element_info.name or cb.window_text() or "").lower()
+                        if "xlsx" not in val and "excel" not in val:
+                            print("[1С:Windows] Выбор типа файла «Лист Excel (*.xlsx)» в диалоге...")
+                            cb.click_input()
+                            time.sleep(0.3)
+                            # Ищем в выпадающем списке пункт с xlsx / excel
+                            for w in self.Desktop(backend="uia").windows():
+                                for it in w.descendants():
+                                    it_txt = (it.element_info.name or it.window_text() or "").lower()
+                                    if "xlsx" in it_txt or "excel 2007" in it_txt or "лист excel" in it_txt:
+                                        it.click_input()
+                                        switched_type = True
+                                        break
+                                if switched_type:
+                                    break
+                            if not switched_type:
+                                # В 1С Excel идет сразу после Табличного документа: Стрелка вниз -> Enter
+                                self._send_hotkey(self.win32con.VK_DOWN)
+                                time.sleep(0.1)
+                                self._send_hotkey(self.win32con.VK_RETURN)
+                                switched_type = True
+                            time.sleep(0.3)
+                        else:
+                            switched_type = True
+                        break
+            except Exception as e:
+                logger.debug("UIA выбор типа файла: %s", e)
+
+        if not switched_type:
+            # Клавиатурное переключение: Alt + Т (переход в тип файла) -> Стрелка вниз -> Enter
+            print("[1С:Windows] Переключение типа файла по Alt+Т...")
+            self._send_hotkey(self.win32con.VK_MENU, 0x54)  # Alt + T
+            time.sleep(0.2)
+            self._send_hotkey(self.win32con.VK_DOWN)
+            time.sleep(0.1)
+            self._send_hotkey(self.win32con.VK_RETURN)
+            time.sleep(0.2)
+
+        # 2. Переход в поле имени файла (Alt + N / Alt + И)
+        self._send_hotkey(self.win32con.VK_MENU, 0x4E)  # Alt + N
+        time.sleep(0.2)
+
+        # 3. Ввод пути сохранения в диалог
         self._select_all_and_paste(target_filepath)
         time.sleep(0.4)
 
@@ -1006,6 +1045,8 @@ class WindowsOneCExporter(BaseOneCExporter):
         file_ready = False
         for _ in range(25):
             if os.path.exists(target_filepath) and os.path.getsize(target_filepath) > 0:
+                # Проверяем, что файл закончил записываться
+                time.sleep(0.5)
                 file_ready = True
                 break
             time.sleep(1.0)
@@ -1016,13 +1057,25 @@ class WindowsOneCExporter(BaseOneCExporter):
                 "Проверьте права на запись или открытые диалоговые окна 1С."
             )
 
-        print(f"[1С:Windows] ✓ Таблица успешно сохранена на рабочий стол: {target_filepath}")
+        # Проверяем сигнатуру XLSX (ZIP PK\x03\x04)
+        try:
+            with open(target_filepath, "rb") as f:
+                sig = f.read(4)
+            if sig == b"PK\x03\x04":
+                print(f"[1С:Windows] ✓ Таблица успешно сохранена в формате Excel (XLSX): {target_filepath}")
+            else:
+                logger.warning("Файл %s имеет сигнатуру %s (не PK). Проверьте тип файла 1С.", target_filepath, sig)
+        except Exception:
+            pass
 
-        # ЗАКРЫТИЕ СФОРМИРОВАННОЙ ВКЛАДКИ (ТОЛЬКО ПОСЛЕ УСПЕШНОГО СОХРАНЕНИЯ!)
-        print("[1С:Windows] Закрытие сформированной вкладки (Ctrl+F4)...")
-        time.sleep(0.5)
-        self._hotkey_ctrl_f4()
-        time.sleep(1.2)
+        # 4. Закрытие временной вкладки (только если close_tab_after=True!)
+        if close_tab_after:
+            print("[1С:Windows] Закрытие временной сформированной вкладки (Ctrl+F4)...")
+            time.sleep(0.5)
+            self._hotkey_ctrl_f4()
+            time.sleep(1.2)
+        else:
+            print("[1С:Windows] Раздел 1С остается открытым (закрытие вкладки не требуется).")
 
     # ---------------------------------------------------------------------
     # Полный цикл выгрузки всех 3 таблиц
