@@ -8,14 +8,21 @@ onec_exporter.py — Автоматизация выгрузки таблиц и
        - «Маршрутный лист»: e1cib/list/Документ.МаршрутныйЛист
        - «Электронные транспортные накладные»: e1cib/list/Документ.ЭлектроннаяТранспортнаяНакладная
        - «Контроль подписания»: e1cib/data/Справочник.ВариантыОтчетов?ref=946700e0ed9e2e9e11f1495d81d50ffe
-       (В диалоге перехода используется кнопка «Вставить из буфера», что исключает любые сбои раскладки).
+       (В диалоге перехода используется кнопка «Вставить из буфера», что исключает сбои раскладки).
     3. Раздел «Маршрутный лист»:
        - Заполнение дат фильтра отгрузки («Больше или равно» и «Меньше или равно») в шапке списка.
-       - Прямой вызов кнопки «Вывести список...» на панели инструментов.
+       - Нажатие прямой кнопки «Вывести список...» на панели инструментов.
+       - В диалоге «Вывести список»:
+         * Нажатие значка «Снять все флажки».
+         * Включение галочек только для: «Номер», «Водитель», «Перевозчик», «Модель расчетов».
+         * Нажатие [ОК].
        - Сохранение таблицы в 'Модель расчетов.xlsx' и закрытие вкладки «Информация по МЛ» (Ctrl+F4).
     4. Раздел «Электронные транспортные накладные»:
-       - Установка периода через «Еще ▾» ➔ «Установить период...» (или плашку периода) в диалоге «Выберите период».
-       - Меню «Еще ▾» ➔ «Вывести список...» ➔ подтверждение колонок.
+       - Установка периода через меню «Еще ▾» ➔ «Установить период...» (или плашку периода) в диалоге «Выберите период».
+       - Меню «Еще ▾» ➔ «Вывести список...».
+       - В диалоге «Вывести список»:
+         * Снятие галочек с: «Внутренний номер», «Грузоотправитель», «Комментарий».
+         * Нажатие [ОК].
        - Сохранение таблицы в 'ЭТРН 1с.xlsx' и закрытие вкладки «Список» (Ctrl+F4).
     5. Отчет «Контроль подписания перевозчиков по ЭТРН»:
        - Заполнение дат в шапке отчета.
@@ -111,7 +118,11 @@ class MockOneCExporter(BaseOneCExporter):
         print(f"    URL: «{self.cfg.url_marshrut}»")
         print(f"    Открыт раздел: «{self.cfg.title_marshrut}» [OK]")
         print(f"    Установка дат в фильтре отгрузки: с {m_start} по {m_end}")
-        print(f"    Кнопка тулбара «Вывести список...» ➔ [ОК] в диалоге")
+        print(f"    Кнопка тулбара «Вывести список...»")
+        print(f"    Диалог «Вывести список»:")
+        print(f"      • Нажатие «Снять все флажки»")
+        print(f"      • Включение только: Номер, Водитель, Перевозчик, Модель расчетов")
+        print(f"      • Нажатие [ОК]")
         print(f"    Сохранение (Ctrl+S) ➔ «{self.cfg.model_file}»")
         print(f"    Закрытие вкладки «Информация по МЛ» (Ctrl+F4)")
         time.sleep(0.4)
@@ -122,7 +133,10 @@ class MockOneCExporter(BaseOneCExporter):
         print(f"    URL: «{self.cfg.url_etrn}»")
         print(f"    Открыт раздел: «{self.cfg.title_etrn}» [OK]")
         print(f"    Установка периода списка через диалог: с {e_start} по {e_end}")
-        print(f"    Таблица Еще ➔ «Вывести список...» ➔ [ОК] в диалоге")
+        print(f"    Таблица Еще ➔ «Вывести список...»")
+        print(f"    Диалог «Вывести список»:")
+        print(f"      • Снятие флажков: Внутренний номер, Грузоотправитель, Комментарий")
+        print(f"      • Нажатие [ОК]")
         print(f"    Сохранение (Ctrl+S) ➔ «{self.cfg.etrn_file}»")
         print(f"    Закрытие вкладки «Список» (Ctrl+F4)")
         time.sleep(0.4)
@@ -244,6 +258,34 @@ class WindowsOneCExporter(BaseOneCExporter):
         time.sleep(0.1)
 
     # ---------------------------------------------------------------------
+    # Управление окнами и диалогами
+    # ---------------------------------------------------------------------
+    def _is_dialog_open(self, title_sub: str) -> bool:
+        """Проверяет, открыто ли окно с указанной подстрокой в заголовке."""
+        try:
+            for w in self.app.windows():
+                t = (w.element_info.name or w.window_text() or "").lower()
+                if title_sub.lower() in t:
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _find_dialog(self, title_sub: str, timeout: float = 6.0):
+        """Ищет окно с указанной подстрокой в заголовке с таймаутом."""
+        end_time = time.time() + timeout
+        while time.time() < end_time:
+            try:
+                for w in self.app.windows():
+                    t = (w.element_info.name or w.window_text() or "").lower()
+                    if title_sub.lower() in t:
+                        return w
+            except Exception:
+                pass
+            time.sleep(0.3)
+        return None
+
+    # ---------------------------------------------------------------------
     # Активация и максимизация окна 1С
     # ---------------------------------------------------------------------
     def _find_and_activate_1c(self) -> None:
@@ -306,19 +348,7 @@ class WindowsOneCExporter(BaseOneCExporter):
         time.sleep(1.0)
 
         # 3. Ищем окно «Переход по ссылке»
-        link_dlg = None
-        for _ in range(5):
-            try:
-                for w in self.app.windows():
-                    title = (w.element_info.name or w.window_text() or "").strip()
-                    if "переход по ссылке" in title.lower():
-                        link_dlg = w
-                        break
-            except Exception:
-                pass
-            if link_dlg:
-                break
-            time.sleep(0.3)
+        link_dlg = self._find_dialog("переход по ссылке", timeout=4.0)
 
         # 4. Нажимаем кнопку «Вставить из буфера»
         pasted = False
@@ -363,7 +393,7 @@ class WindowsOneCExporter(BaseOneCExporter):
         print(f"[1С:Windows] ✓ Раздел «{section_title}» успешно открыт по прямой ссылке.")
 
     # ---------------------------------------------------------------------
-    # Раздел 1: «Маршрутный лист» (фильтр отгрузки и кнопка Вывести список)
+    # Раздел 1: «Маршрутный лист»
     # ---------------------------------------------------------------------
     def _set_marshrut_period(self, date_from: datetime, date_to: datetime) -> None:
         """
@@ -382,7 +412,6 @@ class WindowsOneCExporter(BaseOneCExporter):
                 for el in w.descendants(control_type="Edit"):
                     try:
                         r = el.rectangle()
-                        # Поля фильтра дат находятся в области y: 90..180, x: 400..750
                         if 90 <= r.top <= 180 and 400 <= r.left <= 750:
                             edits_found.append(el)
                     except Exception:
@@ -390,7 +419,6 @@ class WindowsOneCExporter(BaseOneCExporter):
         except Exception as e:
             logger.debug("Поиск Edit полей Маршрутного листа: %s", e)
 
-        # Сортируем поля сверху вниз (edits[0] — Больше или равно, edits[1] — Меньше или равно)
         edits_found.sort(key=lambda x: x.rectangle().top)
 
         if len(edits_found) >= 2:
@@ -418,10 +446,134 @@ class WindowsOneCExporter(BaseOneCExporter):
             self._select_all_and_paste(d_to_str)
             time.sleep(0.15)
 
-        # Обновление списка (Enter или кнопка Обновить)
+        # Обновление списка (Enter)
         self._hotkey_enter()
         time.sleep(2.0)
         print(f"[1С:Windows] ✓ Фильтр «Маршрутный лист» установлен: {d_from_str} - {d_to_str}.")
+
+    def _configure_ml_columns(self, dlg) -> None:
+        """
+        Настраивает колонки в диалоге «Вывести список» для «Маршрутный лист»:
+        1. Нажимает кнопку «Снять все флажки».
+        2. Включает только: «Номер», «Водитель», «Перевозчик», «Модель расчетов».
+        3. Нажимает кнопку [ОК].
+        """
+        print("[1С:Windows] Настройка колонок «Маршрутный лист» (Номер, Водитель, Перевозчик, Модель расчетов)...")
+        r = dlg.rectangle()
+
+        # Шаг 1: Нажатие кнопки «Снять все флажки»
+        uncheck_btn = None
+        try:
+            for btn in dlg.descendants(control_type="Button"):
+                txt = (btn.element_info.name or btn.window_text() or btn.element_info.help_text or "").lower()
+                if "снять" in txt:
+                    uncheck_btn = btn
+                    break
+        except Exception:
+            pass
+
+        if uncheck_btn:
+            print("[1С:Windows] Нажатие кнопки «Снять все флажки» (UIA)...")
+            uncheck_btn.click_input()
+        else:
+            print("[1С:Windows] Нажатие кнопки «Снять все флажки» по координатам...")
+            # Координата кнопки «Снять все флажки» (r.right - 35, r.top + 77)
+            self.pywinauto.mouse.click(coords=(r.right - 35, r.top + 77))
+
+        time.sleep(0.5)
+
+        # Шаг 2: Установка галочек: Номер, Водитель, Перевозчик, Модель расчетов
+        targets = ["номер", "водитель", "перевозчик", "модель расчетов", "модель"]
+        checked = set()
+
+        try:
+            for el in dlg.descendants():
+                txt = (el.element_info.name or el.window_text() or "").strip().lower()
+                for t in targets:
+                    if t in txt and t not in checked:
+                        el_r = el.rectangle()
+                        if r.top + 95 <= el_r.top <= r.top + 380:
+                            self.pywinauto.mouse.click(coords=(r.left + 22, (el_r.top + el_r.bottom) // 2))
+                            checked.add(t)
+                            time.sleep(0.2)
+        except Exception as e:
+            logger.debug("UIA поиск колонок ML: %s", e)
+
+        # Точные координаты строк в начальном положении списка:
+        # Строка 2: Номер (y_mid = r.top + 134)
+        if "номер" not in checked:
+            print("[1С:Windows] Включение колонки «Номер»...")
+            self.pywinauto.mouse.click(coords=(r.left + 22, r.top + 134))
+            time.sleep(0.2)
+
+        # Строка 5: Водитель (y_mid = r.top + 206)
+        if "водитель" not in checked:
+            print("[1С:Windows] Включение колонки «Водитель»...")
+            self.pywinauto.mouse.click(coords=(r.left + 22, r.top + 206))
+            time.sleep(0.2)
+
+        # Строка 10: Перевозчик (y_mid = r.top + 326)
+        if "перевозчик" not in checked:
+            print("[1С:Windows] Включение колонки «Перевозчик»...")
+            self.pywinauto.mouse.click(coords=(r.left + 22, r.top + 326))
+            time.sleep(0.2)
+
+        # Строка «Модель расчетов» (находится ниже видимой области)
+        if "модель расчетов" not in checked and "модель" not in checked:
+            print("[1С:Windows] Поиск и включение колонки «Модель расчетов»...")
+            # Фокусируем список колонок
+            self.pywinauto.mouse.click(coords=(r.left + 100, r.top + 150))
+            time.sleep(0.2)
+
+            # Способ А: в 1С нажатие буквы 'м' мгновенно переходит на строку «Модель расчетов»
+            try:
+                self.win32api.LoadKeyboardLayout("00000419", self.win32con.KLF_ACTIVATE)
+                self.send_keys("м", with_spaces=True)
+                time.sleep(0.3)
+                self._send_hotkey(self.win32con.VK_SPACE)
+                time.sleep(0.2)
+            except Exception as e:
+                logger.debug("Клавиатурный выбор 'Модель расчетов': %s", e)
+
+            # Способ Б: прокрутка вниз (PageDown)
+            self._send_hotkey(self.win32con.VK_NEXT)  # PageDown
+            time.sleep(0.3)
+            try:
+                for el in dlg.descendants():
+                    txt = (el.element_info.name or el.window_text() or "").strip().lower()
+                    if "модель" in txt:
+                        el_r = el.rectangle()
+                        self.pywinauto.mouse.click(coords=(r.left + 22, (el_r.top + el_r.bottom) // 2))
+                        time.sleep(0.2)
+                        break
+            except Exception:
+                pass
+
+        # Шаг 3: Нажатие кнопки «ОК»
+        print("[1С:Windows] Подтверждение настроенных колонок (ОК)...")
+        ok_clicked = False
+        try:
+            for btn in dlg.descendants(control_type="Button"):
+                txt = (btn.element_info.name or btn.window_text() or "").strip().lower()
+                if txt == "ок":
+                    btn.click_input()
+                    ok_clicked = True
+                    break
+        except Exception:
+            pass
+
+        if not ok_clicked:
+            # Желтая кнопка ОК (r.left + 215, r.top + 430)
+            self.pywinauto.mouse.click(coords=(r.left + 215, r.top + 430))
+
+        # Ожидание закрытия модального диалога
+        for _ in range(12):
+            if not self._is_dialog_open("вывести список"):
+                break
+            time.sleep(0.4)
+
+        # Ожидание генерации табличного документа «Информация по МЛ»
+        time.sleep(3.5)
 
     def _export_marshrut_list(self, target_filepath: str) -> None:
         """
@@ -438,7 +590,6 @@ class WindowsOneCExporter(BaseOneCExporter):
                     if "вывести список" in txt:
                         btn.click_input()
                         btn_clicked = True
-                        time.sleep(1.0)
                         break
                 if btn_clicked:
                     break
@@ -446,16 +597,19 @@ class WindowsOneCExporter(BaseOneCExporter):
             pass
 
         if not btn_clicked:
-            # Кнопка «Вывести список...» на панели инструментов находится по coords ~ (1010, 88)
+            # Кнопка «Вывести список...» на панели инструментов ~ (1010, 88)
             print("[1С:Windows] Клик по кнопке «Вывести список...» по координатам тулбара...")
             self.pywinauto.mouse.click(coords=(1010, 88))
-            time.sleep(1.2)
 
-        # 2. Подтверждение колонок в диалоге «Вывести список» (нажать ОК / Enter)
-        print("[1С:Windows] Подтверждение диалога «Вывести список» (ОК)...")
-        self._confirm_export_dialog()
+        # 2. Ожидаем появления диалога «Вывести список»
+        dlg = self._find_dialog("вывести список", timeout=5.0)
+        if not dlg:
+            raise RuntimeError("Не открылся диалог «Вывести список» в разделе «Маршрутный лист»!")
 
-        # 3. Сохранение файла и закрытие вкладки «Информация по МЛ»
+        # 3. Настройка колонок (Снять все -> Номер, Водитель, Перевозчик, Модель расчетов -> ОК)
+        self._configure_ml_columns(dlg)
+
+        # 4. Сохранение файла и закрытие вкладки «Информация по МЛ»
         self._save_in_dialog(target_filepath)
 
     # ---------------------------------------------------------------------
@@ -506,7 +660,6 @@ class WindowsOneCExporter(BaseOneCExporter):
 
         # 3. Заполнение полей даты в диалоге «Выберите период»
         print("[1С:Windows] Заполнение дат в диалоге «Выберите период»...")
-        # При открытии диалога фокус уже стоит на первом поле даты
         self._select_all_and_paste(d_from_str)
         self._hotkey_tab()
         time.sleep(0.2)
@@ -537,6 +690,77 @@ class WindowsOneCExporter(BaseOneCExporter):
 
         print(f"[1С:Windows] ✓ Период списка «ЭТРН» успешно установлен: {d_from_str} - {d_to_str}.")
 
+    def _configure_etrn_columns(self, dlg) -> None:
+        """
+        Настраивает колонки в диалоге «Вывести список» для «ЭТРН»:
+        Снимает галочки только с:
+        - «Внутренний номер»
+        - «Грузоотправитель»
+        - «Комментарий»
+        Остальные (Номер, Дата, Грузополучатель, Перевозчик, Текущий шаг, Состояние ЭДО) остаются включенными.
+        """
+        print("[1С:Windows] Настройка колонок «ЭТРН» (снятие: Внутренний номер, Грузоотправитель, Комментарий)...")
+        r = dlg.rectangle()
+
+        # Снятие галочек через поиск элементов UIA
+        targets_to_uncheck = ["внутренний номер", "грузоотправитель", "комментарий"]
+        uncheck_done = set()
+        try:
+            for el in dlg.descendants():
+                txt = (el.element_info.name or el.window_text() or "").strip().lower()
+                for t in targets_to_uncheck:
+                    if t in txt and t not in uncheck_done:
+                        el_r = el.rectangle()
+                        self.pywinauto.mouse.click(coords=(r.left + 22, (el_r.top + el_r.bottom) // 2))
+                        uncheck_done.add(t)
+                        time.sleep(0.2)
+        except Exception as e:
+            logger.debug("UIA поиск колонок ETRN: %s", e)
+
+        # Точные координаты строк в диалоге ЭТРН (9 строк по 24px):
+        # Строка 3: Внутренний номер (y_mid = r.top + 158)
+        if "внутренний номер" not in uncheck_done:
+            print("[1С:Windows] Снятие галочки «Внутренний номер»...")
+            self.pywinauto.mouse.click(coords=(r.left + 22, r.top + 158))
+            time.sleep(0.2)
+
+        # Строка 4: Грузоотправитель (y_mid = r.top + 182)
+        if "грузоотправитель" not in uncheck_done:
+            print("[1С:Windows] Снятие галочки «Грузоотправитель»...")
+            self.pywinauto.mouse.click(coords=(r.left + 22, r.top + 182))
+            time.sleep(0.2)
+
+        # Строка 9: Комментарий (y_mid = r.top + 302)
+        if "комментарий" not in uncheck_done:
+            print("[1С:Windows] Снятие галочки «Комментарий»...")
+            self.pywinauto.mouse.click(coords=(r.left + 22, r.top + 302))
+            time.sleep(0.2)
+
+        # Нажатие кнопки «ОК»
+        print("[1С:Windows] Подтверждение колонок ЭТРН (ОК)...")
+        ok_clicked = False
+        try:
+            for btn in dlg.descendants(control_type="Button"):
+                txt = (btn.element_info.name or btn.window_text() or "").strip().lower()
+                if txt == "ок":
+                    btn.click_input()
+                    ok_clicked = True
+                    break
+        except Exception:
+            pass
+
+        if not ok_clicked:
+            self.pywinauto.mouse.click(coords=(r.left + 215, r.top + 430))
+
+        # Ожидание закрытия модального диалога
+        for _ in range(12):
+            if not self._is_dialog_open("вывести список"):
+                break
+            time.sleep(0.4)
+
+        # Ожидание генерации табличного документа «Список»
+        time.sleep(3.5)
+
     def _export_etrn_list(self, target_filepath: str) -> None:
         """
         Выгружает открытый список «ЭТРН» через меню таблицы «Еще ▾» ➔ «Вывести список...»
@@ -556,7 +780,6 @@ class WindowsOneCExporter(BaseOneCExporter):
                     if "вывести список" in txt:
                         el.click_input()
                         item_clicked = True
-                        time.sleep(1.0)
                         break
                 except Exception:
                     continue
@@ -564,14 +787,18 @@ class WindowsOneCExporter(BaseOneCExporter):
                 break
 
         if not item_clicked:
-            # Fallback: координатный клик пункта меню
+            # Fallback: координатный клик пункта меню ~ (1600, 576)
             self.pywinauto.mouse.click(coords=(1600, 576))
-            time.sleep(1.0)
 
-        # 3. Подтверждение колонок в диалоге «Вывести список» (ОК)
-        self._confirm_export_dialog()
+        # 3. Ожидаем появления диалога «Вывести список»
+        dlg = self._find_dialog("вывести список", timeout=5.0)
+        if not dlg:
+            raise RuntimeError("Не открылся диалог «Вывести список» в разделе «ЭТРН»!")
 
-        # 4. Сохранение файла и закрытие сформированной вкладки «Список»
+        # 4. Настройка колонок (Снятие: Внутренний номер, Грузоотправитель, Комментарий -> ОК)
+        self._configure_etrn_columns(dlg)
+
+        # 5. Сохранение файла и закрытие вкладки «Список»
         self._save_in_dialog(target_filepath)
 
     # ---------------------------------------------------------------------
@@ -619,7 +846,7 @@ class WindowsOneCExporter(BaseOneCExporter):
             self._select_all_and_paste(d_to_str)
             time.sleep(0.15)
         else:
-            # Координатный ввод в шапке отчета: первое поле ~ (350, 80), второе ~ (450, 80)
+            # Координатный ввод в шапке отчета: (350, 80) и (450, 80)
             self.pywinauto.mouse.click(coords=(350, 80))
             time.sleep(0.15)
             self._select_all_and_paste(d_from_str)
@@ -679,31 +906,6 @@ class WindowsOneCExporter(BaseOneCExporter):
             # Координатный клик кнопки Еще ~ (1860, 80)
             self.pywinauto.mouse.click(coords=(1860, 80))
 
-    def _confirm_export_dialog(self) -> None:
-        """Подтверждает модальное окно «Вывести список» (нажимает кнопку ОК / Enter)."""
-        time.sleep(0.8)
-        confirmed = False
-        try:
-            for w in self.app.windows():
-                title = (w.element_info.name or w.window_text() or "").strip().lower()
-                if "вывести список" in title:
-                    for btn in w.descendants(control_type="Button"):
-                        txt = (btn.element_info.name or btn.window_text() or "").strip().lower()
-                        if txt == "ок":
-                            btn.click_input()
-                            confirmed = True
-                            break
-                if confirmed:
-                    break
-        except Exception:
-            pass
-
-        if not confirmed:
-            self._hotkey_enter()
-
-        # Ожидаем отрисовки сформированного табличного документа
-        time.sleep(3.0)
-
     def _save_in_dialog(self, target_filepath: str) -> None:
         """
         Сохраняет сформированный табличный документ в Excel по Ctrl+S.
@@ -711,7 +913,7 @@ class WindowsOneCExporter(BaseOneCExporter):
         """
         print(f"[1С:Windows] Сохранение документа в «{target_filepath}» через Ctrl+S...")
 
-        # Удаляем предыдущий файл, чтобы гарантировать проверку нового
+        # Удаляем предыдущий файл, чтобы гарантировать проверку свежего
         if os.path.exists(target_filepath):
             try:
                 os.remove(target_filepath)
@@ -722,14 +924,34 @@ class WindowsOneCExporter(BaseOneCExporter):
         self._hotkey_ctrl_s()
         time.sleep(1.5)
 
+        # Поиск диалога сохранения
+        save_dlg = self._find_dialog("сохран", timeout=4.0)
+        if not save_dlg:
+            save_dlg = self._find_dialog("save", timeout=1.0)
+
         # Ввод пути сохранения в диалог
         self._select_all_and_paste(target_filepath)
         time.sleep(0.4)
-        self._hotkey_enter()
-        time.sleep(1.0)
 
-        # Проверка диалога подтверждения перезаписи ("Заменить существующий?")
-        self._hotkey_enter()
+        if save_dlg:
+            try:
+                for btn in save_dlg.descendants(control_type="Button"):
+                    txt = (btn.element_info.name or btn.window_text() or "").strip().lower()
+                    if txt == "сохранить":
+                        btn.click_input()
+                        break
+            except Exception:
+                self._hotkey_enter()
+        else:
+            self._hotkey_enter()
+
+        time.sleep(1.0)
+        # Подтверждение перезаписи (если выскочит "Заменить существующий файл?")
+        confirm_dlg = self._find_dialog("подтверд", timeout=1.0)
+        if confirm_dlg:
+            self._hotkey_enter()
+        else:
+            time.sleep(0.3)
 
         # Ожидание физической записи файла на диск (до 25 секунд)
         file_ready = False
