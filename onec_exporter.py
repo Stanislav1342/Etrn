@@ -342,52 +342,94 @@ class WindowsOneCExporter(BaseOneCExporter):
         self.main_win = self.app.window(handle=hwnd)
 
         # Разворачиваем окно на весь экран для предсказуемых координат
-        self.win32gui.ShowWindow(hwnd, self.win32con.SW_MAXIMIZE)
+        try:
+            self.win32gui.ShowWindow(hwnd, self.win32con.SW_MAXIMIZE)
+        except Exception:
+            pass
         time.sleep(0.3)
 
-        # Обход ограничения Windows SetForegroundWindow Lock через симуляцию ALT
-        self._send_vk(self.win32con.VK_MENU, down=True)
-        self._send_vk(self.win32con.VK_MENU, down=False)
-        self.win32gui.SetForegroundWindow(hwnd)
+        try:
+            self.win32gui.SetForegroundWindow(hwnd)
+        except Exception:
+            pass
 
         try:
             self.main_win.set_focus()
         except Exception:
             pass
 
-        time.sleep(0.4)
-        # Сброс возможного фокуса системного меню после нажатия ALT
-        self._hotkey_esc()
-        time.sleep(0.3)
+        time.sleep(0.5)
         print("[1С:Windows] ✓ Окно 1С успешно максимизировано и активировано.")
 
     # ---------------------------------------------------------------------
-    # Прямой переход по ссылке 1С (Shift + F11 / e1cib)
+    # Управление вкладками 1С и безопасный переход по ссылкам (e1cib)
     # ---------------------------------------------------------------------
-    def _open_by_link(self, url: str, section_title: str) -> None:
+    def _activate_tab_by_name(self, section_title: str) -> bool:
         """
-        Мгновенно открывает любой раздел 1С по ссылке e1cib через Shift + F11.
-        Использует кнопку «Вставить из буфера», что исключает проблемы раскладки.
+        Ищет вкладку с подстрокой section_title на нижней панели открытых вкладок 1С.
+        Кликает строго по левой части вкладки (r.left + 25), чтобы исключить клик по крестику [x].
+        Возвращает True, если вкладка найдена и успешно активирована.
         """
-        print(f"\n[1С:Windows] Переход по прямой ссылке в «{section_title}»...")
+        if not self.main_win:
+            return False
+
+        try:
+            main_r = self.main_win.rectangle()
+            kw = section_title.lower().strip()
+            synonyms = [kw]
+            if "маршрут" in kw:
+                synonyms.extend(["маршрутн", "маршрутный"])
+            elif "электронн" in kw or "этрн" in kw:
+                synonyms.extend(["электронн", "этрн", "транспортные накладные"])
+            elif "контроль подписания" in kw or "процент" in kw:
+                synonyms.extend(["контроль подписания", "вариант отчета", "подписания перевозчиков"])
+
+            for el in self.main_win.descendants():
+                try:
+                    txt = (el.element_info.name or el.window_text() or "").strip().lower()
+                    if not txt:
+                        continue
+                    if any(s in txt for s in synonyms):
+                        r = el.rectangle()
+                        # Нижняя панель открытых вкладок 1С Такси (нижние 80 пикселей)
+                        if r.top >= main_r.bottom - 80 and r.width() > 30 and r.height() > 15:
+                            click_x = r.left + min(35, r.width() // 3)
+                            click_y = r.top + r.height() // 2
+                            self.pywinauto.mouse.click(coords=(click_x, click_y))
+                            return True
+                except Exception:
+                    continue
+        except Exception as e:
+            logger.debug("Поиск открытой вкладки '%s': %s", section_title, e)
+
+        return False
+
+    def _activate_tab_or_open_link(self, url: str, section_title: str) -> None:
+        """
+        Переходит в раздел 1С.
+        Если раздел уже открыт на нижней панели вкладок — активирует его безопасным кликом.
+        Если еще не открыт — открывает по ссылке e1cib через Shift + F11.
+        """
+        print(f"\n[1С:Windows] Активация раздела «{section_title}»...")
+
+        # 1. Проверяем, не открыт ли раздел уже на нижней панели вкладок 1С
+        if self._activate_tab_by_name(section_title):
+            print(f"[1С:Windows] ✓ Раздел «{section_title}» уже был открыт — активирован кликом по вкладке.")
+            time.sleep(1.0)
+            return
+
+        # 2. Если вкладка еще не открыта — переходим по прямой ссылке Shift + F11
+        print(f"[1С:Windows] Открытие раздела «{section_title}» по ссылке (Shift+F11)...")
         print(f"             URL: {url}")
 
-        # Сбрасываем контекстные меню или диалоги
-        self._hotkey_esc()
-        time.sleep(0.3)
-
-        # 1. Помещаем URL в буфер обмена
         set_clipboard(url)
         time.sleep(0.1)
 
-        # 2. Вызываем окно «Переход по ссылке» через Shift + F11
         self._hotkey_shift_f11()
         time.sleep(1.0)
 
-        # 3. Ищем окно «Переход по ссылке»
         link_dlg = self._find_dialog("переход по ссылке", timeout=4.0)
 
-        # 4. Нажимаем кнопку «Вставить из буфера»
         pasted = False
         if link_dlg:
             try:
@@ -399,16 +441,12 @@ class WindowsOneCExporter(BaseOneCExporter):
                         time.sleep(0.3)
                         break
             except Exception as e:
-                logger.debug("Клик по 'Вставить из буфера': %s", e)
+                logger.debug("Клик 'Вставить из буфера': %s", e)
 
         if not pasted:
-            # Горячая клавиша кнопки «Вставить из буфера» (Alt + В)
-            self._send_hotkey(self.win32con.VK_MENU, 0x44)  # Alt + D (В)
-            time.sleep(0.2)
             self._paste_clipboard()
             time.sleep(0.2)
 
-        # 5. Нажимаем кнопку «Перейти»
         transitioned = False
         if link_dlg:
             try:
@@ -425,9 +463,57 @@ class WindowsOneCExporter(BaseOneCExporter):
         if not transitioned:
             self._hotkey_enter()
 
-        # Ожидаем отрисовки целевой формы
         time.sleep(3.0)
-        print(f"[1С:Windows] ✓ Раздел «{section_title}» успешно открыт по прямой ссылке.")
+        print(f"[1С:Windows] ✓ Раздел «{section_title}» открыт по прямой ссылке.")
+
+    def _open_by_link(self, url: str, section_title: str) -> None:
+        """Алиас для обратной совместимости."""
+        self._activate_tab_or_open_link(url, section_title)
+
+    def _close_temporary_tab(self, tab_title_keyword: str) -> None:
+        """
+        Безопасно закрывает ТОЛЬКО временные вкладки формирования списка:
+        - «Информация по МЛ»
+        - «Список»
+        СТРОГО ЗАПРЕЩЕНО закрывать любые постоянные разделы пользователя:
+        «Маршрутный лист», «Электронные транспортные накладные», «Логгеры температуры», «Рабочее место Холодовая цепь»!
+        """
+        kw = tab_title_keyword.lower().strip()
+        if kw not in ("информация по мл", "список"):
+            logger.warning(
+                "Попытка закрытия вкладки '%s', не являющейся временным списком! Действие отменено.",
+                tab_title_keyword,
+            )
+            return
+
+        print(f"[1С:Windows] Безопасное закрытие временной вкладки «{tab_title_keyword}»...")
+        if not self.main_win:
+            return
+
+        closed = False
+        try:
+            main_r = self.main_win.rectangle()
+            for el in self.main_win.descendants():
+                try:
+                    txt = (el.element_info.name or el.window_text() or "").strip().lower()
+                    if kw in txt:
+                        r = el.rectangle()
+                        if r.top >= main_r.bottom - 80 and r.width() > 30:
+                            # Крестик [x] закрытия вкладки расположен у правого края вкладки
+                            close_x = r.right - 12
+                            close_y = r.top + r.height() // 2
+                            print(f"[1С:Windows] Клик по крестику [x] временной вкладки «{txt}»...")
+                            self.pywinauto.mouse.click(coords=(close_x, close_y))
+                            closed = True
+                            time.sleep(1.0)
+                            break
+                except Exception:
+                    continue
+        except Exception as e:
+            logger.debug("Закрытие временной вкладки '%s': %s", tab_title_keyword, e)
+
+        if not closed:
+            print(f"[1С:Windows] Временная вкладка «{tab_title_keyword}» уже закрыта.")
 
     # ---------------------------------------------------------------------
     # Раздел 1: «Маршрутный лист»
@@ -649,8 +735,12 @@ class WindowsOneCExporter(BaseOneCExporter):
         # 4. Настройка колонок в диалоге
         self._configure_ml_columns(dlg)
 
-        # 5. Сохранение файла и закрытие вкладки «Информация по МЛ»
+        # 5. Сохранение файла на рабочий стол
         self._save_in_dialog(target_filepath)
+
+        # 6. Безопасное закрытие только временной вкладки «Информация по МЛ»
+        time.sleep(0.5)
+        self._close_temporary_tab("Информация по МЛ")
 
     # ---------------------------------------------------------------------
     # Раздел 2: «Электронные транспортные накладные»
@@ -842,8 +932,12 @@ class WindowsOneCExporter(BaseOneCExporter):
         # 4. Настройка колонок (Снятие: Внутренний номер, Грузоотправитель, Комментарий -> ОК)
         self._configure_etrn_columns(dlg)
 
-        # 5. Сохранение файла и закрытие вкладки «Список»
+        # 5. Сохранение файла на рабочий стол
         self._save_in_dialog(target_filepath)
+
+        # 6. Безопасное закрытие только временной вкладки «Список»
+        time.sleep(0.5)
+        self._close_temporary_tab("Список")
 
     # ---------------------------------------------------------------------
     # Раздел 3: Отчет «Контроль подписания перевозчиков по ЭТРН»
@@ -919,7 +1013,7 @@ class WindowsOneCExporter(BaseOneCExporter):
         time.sleep(8.0)
 
         # Сохранение отчета (вкладку самого отчета НЕ закрываем, чтобы не закрывать разделы пользователя)
-        self._save_in_dialog(target_filepath, close_tab_after=False)
+        self._save_in_dialog(target_filepath)
 
     # ---------------------------------------------------------------------
     # Вспомогательные методы выгрузки и сохранения
@@ -943,11 +1037,15 @@ class WindowsOneCExporter(BaseOneCExporter):
             # Координатный клик кнопки Еще ~ (1860, 80)
             self.pywinauto.mouse.click(coords=(1860, 80))
 
-    def _save_in_dialog(self, target_filepath: str, close_tab_after: bool = True) -> None:
+    def _save_in_dialog(self, target_filepath: str) -> None:
         """
         Сохраняет сформированный табличный документ в Excel по Ctrl+S.
-        Гарантирует выбор формата «Лист Excel2007-... (*.xlsx)» в выпадающем списке диалога Windows.
-        При close_tab_after=True закрывает только временную сформированную вкладку (Ctrl+F4).
+        Гарантирует:
+        1. Проверку и выбор формата «Лист Excel2007-... (*.xlsx)».
+        2. Безошибочный ввод полного пути файла в поле «Имя файла:».
+        3. Клик по кнопке [Сохранить].
+        4. Ожидание записи файла на диск и проверку XLSX-сигнатуры (PK).
+        Вкладки не закрывает (закрытие выполняется строго через _close_temporary_tab).
         """
         print(f"[1С:Windows] Сохранение документа в «{target_filepath}» через Ctrl+S...")
 
@@ -958,126 +1056,128 @@ class WindowsOneCExporter(BaseOneCExporter):
             except Exception:
                 pass
 
-        # Вызов диалога Windows «Сохранение»
+        # Вызов системного диалога Windows «Сохранение»
         self._hotkey_ctrl_s()
         time.sleep(1.5)
 
-        # Поиск диалога сохранения через надежный системный поиск
+        # Поиск диалога сохранения через системный поиск
         save_dlg = self._find_dialog("сохран", timeout=5.0)
         if not save_dlg:
-            save_dlg = self._find_dialog("save", timeout=1.0)
+            save_dlg = self._find_dialog("save", timeout=1.5)
+
+        if not save_dlg:
+            raise RuntimeError("Диалоговое окно «Сохранение» не появилось после нажатия Ctrl+S!")
+
+        try:
+            save_dlg.set_focus()
+        except Exception:
+            pass
+
+        dlg_r = save_dlg.rectangle()
 
         # -------------------------------------------------------------
         # 1. Проверка и выбор формата «Лист Excel2007-... (*.xlsx)»
         # -------------------------------------------------------------
-        type_combo = None
-        needs_switch = True
-        if save_dlg:
+        already_xlsx = False
+        try:
+            for el in save_dlg.descendants():
+                txt = (el.element_info.name or el.window_text() or "").lower()
+                val = str(el.legacy_properties().get("Value", "")).lower() if hasattr(el, "legacy_properties") else ""
+                if ("2007" in txt and "xlsx" in txt) or ("2007" in val and "xlsx" in val):
+                    already_xlsx = True
+                    break
+        except Exception as e:
+            logger.debug("Проверка формата xlsx: %s", e)
+
+        if already_xlsx:
+            print("[1С:Windows] ✓ Тип файла уже установлен в «Лист Excel2007-... (*.xlsx)»")
+        else:
+            print("[1С:Windows] Переключение выпадающего списка «Тип файла» на Excel XLSX...")
+            type_combo = None
             try:
                 for cb in save_dlg.descendants(control_type="ComboBox"):
                     txt = (cb.element_info.name or cb.window_text() or "").lower()
                     auto_id = getattr(cb.element_info, "automation_id", "")
-                    if "тип" in txt or "type" in txt or auto_id == "FileTypeControlHost":
+                    r = cb.rectangle()
+                    if auto_id == "FileTypeControlHost" or "тип" in txt or "type" in txt or r.top > dlg_r.bottom - 110:
                         type_combo = cb
-                        # Проверяем текущее значение
-                        val = (cb.element_info.name or cb.window_text() or "").lower()
-                        if "2007" in val or "xlsx" in val:
-                            print("[1С:Windows] ✓ Тип файла уже установлен в «Лист Excel2007-... (*.xlsx)»")
-                            needs_switch = False
                         break
             except Exception as e:
                 logger.debug("Поиск ComboBox типа файла: %s", e)
 
-        if needs_switch and type_combo:
-            try:
-                print("[1С:Windows] Раскрытие выпадающего списка «Тип файла» (UIA)...")
-                type_combo.click_input()
-                time.sleep(0.3)
-                switched_by_item = False
-                for w in self.Desktop(backend="uia").windows():
-                    for it in w.descendants():
-                        it_txt = (it.element_info.name or it.window_text() or "").lower()
-                        if "2007" in it_txt or "xlsx" in it_txt:
-                            it.click_input()
-                            switched_by_item = True
-                            needs_switch = False
-                            print("[1С:Windows] ✓ Выбран формат: «Лист Excel2007-... (*.xlsx)»")
+            if type_combo:
+                try:
+                    type_combo.click_input()
+                    time.sleep(0.3)
+                    switched_by_item = False
+                    for w in self.Desktop(backend="uia").windows():
+                        for it in w.descendants():
+                            it_txt = (it.element_info.name or it.window_text() or "").lower()
+                            if "2007" in it_txt or "xlsx" in it_txt:
+                                it.click_input()
+                                switched_by_item = True
+                                break
+                        if switched_by_item:
                             break
-                    if switched_by_item:
-                        break
-                time.sleep(0.3)
-            except Exception as e:
-                logger.debug("UIA выбор типа файла: %s", e)
-
-        if needs_switch:
-            # Клавиатурный выбор формата:
-            # 1) Alt + Т (переход в поле «Тип файла:»)
-            # 2) Home (переход на первую строку: «Табличный документ (*.mxl)»)
-            # 3) Down (переход ровно на вторую строку: «Лист Excel2007-... (*.xlsx)»)
-            # 4) Enter (подтверждение выбора)
-            print("[1С:Windows] Выбор формата через Alt+Т -> Home -> Down (Лист Excel2007-...)...")
-            self._send_hotkey(self.win32con.VK_MENU, 0x54)  # Alt + T
-            time.sleep(0.2)
-            self._send_hotkey(self.win32con.VK_HOME)  # 1: Табличный документ (*.mxl)
-            time.sleep(0.1)
-            self._send_hotkey(self.win32con.VK_DOWN)  # 2: Лист Excel2007-... (*.xlsx)
-            time.sleep(0.1)
-            self._send_hotkey(self.win32con.VK_RETURN)
-            time.sleep(0.3)
+                    if not switched_by_item:
+                        self._send_hotkey(self.win32con.VK_DOWN)
+                        time.sleep(0.1)
+                        self._hotkey_enter()
+                    time.sleep(0.3)
+                    print("[1С:Windows] ✓ Выбран тип файла: «Лист Excel2007-... (*.xlsx)»")
+                except Exception as e:
+                    logger.debug("UIA выбор типа файла: %s", e)
 
         # -------------------------------------------------------------
-        # 2. Гарантированный фокус и ввод пути в поле «Имя файла:»
+        # 2. Поиск поля «Имя файла:» и ввод полного пути сохранения
         # -------------------------------------------------------------
-        edit_focused = False
-        if save_dlg:
-            try:
-                for ed in save_dlg.descendants(control_type="Edit"):
-                    auto_id = getattr(ed.element_info, "automation_id", "")
-                    ed_name = (ed.element_info.name or ed.window_text() or "").lower()
-                    if auto_id in ("1001", "1148", "FileNameControlHost") or "имя" in ed_name or "name" in ed_name:
-                        print("[1С:Windows] Фокусировка поля «Имя файла» (UIA)...")
-                        ed.click_input()
-                        edit_focused = True
-                        break
-            except Exception as e:
-                logger.debug("Поиск Edit имени файла: %s", e)
+        print(f"[1С:Windows] Вставка пути сохранения: {target_filepath}...")
+        edit_control = None
+        try:
+            for ed in save_dlg.descendants(control_type="Edit"):
+                r = ed.rectangle()
+                # Поле «Имя файла» расположено строго в нижней части диалога (выше кнопок)
+                if dlg_r.bottom - 170 <= r.top <= dlg_r.bottom - 70:
+                    edit_control = ed
+                    break
+        except Exception as e:
+            logger.debug("Поиск Edit имени файла: %s", e)
 
-        if not edit_focused and save_dlg:
+        # 1. Прямое заполнение через Win32 WM_SETTEXT
+        if edit_control:
             try:
-                r = save_dlg.rectangle()
-                # Координата клика по полю ввода «Имя файла» (~60 пикселей выше кнопки Сохранить)
-                print("[1С:Windows] Клик по полю «Имя файла» по координатам окна...")
-                self.pywinauto.mouse.click(coords=(r.left + 250, r.bottom - 110))
-                edit_focused = True
+                self.win32gui.SendMessage(edit_control.handle, self.win32con.WM_SETTEXT, 0, target_filepath)
+                time.sleep(0.1)
+            except Exception as e:
+                logger.debug("WM_SETTEXT: %s", e)
+
+        # 2. Фокусировка кликом и вставка через буфер обмена
+        if edit_control:
+            try:
+                edit_control.click_input()
             except Exception:
                 pass
+        else:
+            self.pywinauto.mouse.click(coords=(dlg_r.left + 250, dlg_r.bottom - 110))
 
-        if not edit_focused:
-            # Горячие клавиши перехода в поле имени файла:
-            # Alt + И (Russian layout: клавиша B / 0x42), затем Alt + N (English layout: 0x4E)
-            self._send_hotkey(self.win32con.VK_MENU, 0x42)
-            time.sleep(0.1)
-            self._send_hotkey(self.win32con.VK_MENU, 0x4E)
-            time.sleep(0.1)
-
-        print(f"[1С:Windows] Вставка пути сохранения: {target_filepath}...")
+        time.sleep(0.15)
         self._select_all_and_paste(target_filepath)
-        time.sleep(0.5)
+        time.sleep(0.3)
 
         # -------------------------------------------------------------
         # 3. Нажатие кнопки «Сохранить»
         # -------------------------------------------------------------
         save_btn = None
-        if save_dlg:
-            try:
-                for btn in save_dlg.descendants(control_type="Button"):
-                    txt = (btn.element_info.name or btn.window_text() or "").strip().lower()
-                    auto_id = getattr(btn.element_info, "automation_id", "")
-                    if txt == "сохранить" or auto_id == "1":
-                        save_btn = btn
-                        break
-            except Exception:
-                pass
+        try:
+            for btn in save_dlg.descendants(control_type="Button"):
+                txt = (btn.element_info.name or btn.window_text() or "").strip().lower()
+                auto_id = getattr(btn.element_info, "automation_id", "")
+                r = btn.rectangle()
+                if (txt in ("сохранить", "save") or auto_id == "1") and r.top >= dlg_r.bottom - 70:
+                    save_btn = btn
+                    break
+        except Exception:
+            pass
 
         if save_btn:
             print("[1С:Windows] Нажатие кнопки «Сохранить»...")
@@ -1127,17 +1227,6 @@ class WindowsOneCExporter(BaseOneCExporter):
         except Exception:
             pass
 
-        # -------------------------------------------------------------
-        # 5. Закрытие временной вкладки сформированного списка
-        # -------------------------------------------------------------
-        if close_tab_after:
-            print("[1С:Windows] Закрытие временной сформированной вкладки (Ctrl+F4)...")
-            time.sleep(0.5)
-            self._hotkey_ctrl_f4()
-            time.sleep(1.2)
-        else:
-            print("[1С:Windows] Раздел 1С остается открытым (закрытие вкладки не требуется).")
-
     # ---------------------------------------------------------------------
     # Полный цикл выгрузки всех 3 таблиц
     # ---------------------------------------------------------------------
@@ -1154,17 +1243,17 @@ class WindowsOneCExporter(BaseOneCExporter):
         self._find_and_activate_1c()
 
         # 2. Выгрузка «Маршрутный лист» -> Модель расчетов.xlsx
-        self._open_by_link(self.cfg.url_marshrut, self.cfg.title_marshrut)
+        self._activate_tab_or_open_link(self.cfg.url_marshrut, self.cfg.title_marshrut)
         self._set_marshrut_period(marshrut_period[0], marshrut_period[1])
         self._export_marshrut_list(self.cfg.model_file)
 
         # 3. Выгрузка «Электронные транспортные накладные» -> ЭТРН 1с.xlsx
-        self._open_by_link(self.cfg.url_etrn, self.cfg.title_etrn)
+        self._activate_tab_or_open_link(self.cfg.url_etrn, self.cfg.title_etrn)
         self._set_etrn_period(etrn_period[0], etrn_period[1])
         self._export_etrn_list(self.cfg.etrn_file)
 
         # 4. Выгрузка «Контроль подписания перевозчиков по ЭТРН» -> Процент.xlsx
-        self._open_by_link(self.cfg.url_percent, self.cfg.title_percent)
+        self._activate_tab_or_open_link(self.cfg.url_percent, self.cfg.title_percent)
         self._export_percent_report(
             etrn_period[0], etrn_period[1], self.cfg.percent_file
         )
