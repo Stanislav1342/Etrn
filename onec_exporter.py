@@ -946,7 +946,7 @@ class WindowsOneCExporter(BaseOneCExporter):
     def _save_in_dialog(self, target_filepath: str, close_tab_after: bool = True) -> None:
         """
         Сохраняет сформированный табличный документ в Excel по Ctrl+S.
-        Гарантирует выбор типа файла «Лист Excel (*.xlsx)» в диалоге Windows Save As.
+        Гарантирует выбор формата «Лист Excel2007-... (*.xlsx)» в выпадающем списке диалога Windows.
         При close_tab_after=True закрывает только временную сформированную вкладку (Ctrl+F4).
         """
         print(f"[1С:Windows] Сохранение документа в «{target_filepath}» через Ctrl+S...")
@@ -967,86 +967,141 @@ class WindowsOneCExporter(BaseOneCExporter):
         if not save_dlg:
             save_dlg = self._find_dialog("save", timeout=1.0)
 
-        # 1. Переключение «Тип файла:» на «Лист Excel (*.xlsx)»
-        switched_type = False
+        # -------------------------------------------------------------
+        # 1. Проверка и выбор формата «Лист Excel2007-... (*.xlsx)»
+        # -------------------------------------------------------------
+        type_combo = None
+        needs_switch = True
         if save_dlg:
             try:
                 for cb in save_dlg.descendants(control_type="ComboBox"):
                     txt = (cb.element_info.name or cb.window_text() or "").lower()
                     auto_id = getattr(cb.element_info, "automation_id", "")
                     if "тип" in txt or "type" in txt or auto_id == "FileTypeControlHost":
+                        type_combo = cb
+                        # Проверяем текущее значение
                         val = (cb.element_info.name or cb.window_text() or "").lower()
-                        if "xlsx" not in val and "excel" not in val:
-                            print("[1С:Windows] Выбор типа файла «Лист Excel (*.xlsx)» в диалоге...")
-                            cb.click_input()
-                            time.sleep(0.3)
-                            # Ищем в выпадающем списке пункт с xlsx / excel
-                            for w in self.Desktop(backend="uia").windows():
-                                for it in w.descendants():
-                                    it_txt = (it.element_info.name or it.window_text() or "").lower()
-                                    if "xlsx" in it_txt or "excel 2007" in it_txt or "лист excel" in it_txt:
-                                        it.click_input()
-                                        switched_type = True
-                                        break
-                                if switched_type:
-                                    break
-                            if not switched_type:
-                                # В 1С Excel идет сразу после Табличного документа: Стрелка вниз -> Enter
-                                self._send_hotkey(self.win32con.VK_DOWN)
-                                time.sleep(0.1)
-                                self._send_hotkey(self.win32con.VK_RETURN)
-                                switched_type = True
-                            time.sleep(0.3)
-                        else:
-                            switched_type = True
+                        if "2007" in val or "xlsx" in val:
+                            print("[1С:Windows] ✓ Тип файла уже установлен в «Лист Excel2007-... (*.xlsx)»")
+                            needs_switch = False
                         break
+            except Exception as e:
+                logger.debug("Поиск ComboBox типа файла: %s", e)
+
+        if needs_switch and type_combo:
+            try:
+                print("[1С:Windows] Раскрытие выпадающего списка «Тип файла» (UIA)...")
+                type_combo.click_input()
+                time.sleep(0.3)
+                switched_by_item = False
+                for w in self.Desktop(backend="uia").windows():
+                    for it in w.descendants():
+                        it_txt = (it.element_info.name or it.window_text() or "").lower()
+                        if "2007" in it_txt or "xlsx" in it_txt:
+                            it.click_input()
+                            switched_by_item = True
+                            needs_switch = False
+                            print("[1С:Windows] ✓ Выбран формат: «Лист Excel2007-... (*.xlsx)»")
+                            break
+                    if switched_by_item:
+                        break
+                time.sleep(0.3)
             except Exception as e:
                 logger.debug("UIA выбор типа файла: %s", e)
 
-        if not switched_type:
-            # Клавиатурное переключение: Alt + Т (переход в тип файла) -> Стрелка вниз -> Enter
-            print("[1С:Windows] Переключение типа файла по Alt+Т...")
+        if needs_switch:
+            # Клавиатурный выбор формата:
+            # 1) Alt + Т (переход в поле «Тип файла:»)
+            # 2) Home (переход на первую строку: «Табличный документ (*.mxl)»)
+            # 3) Down (переход ровно на вторую строку: «Лист Excel2007-... (*.xlsx)»)
+            # 4) Enter (подтверждение выбора)
+            print("[1С:Windows] Выбор формата через Alt+Т -> Home -> Down (Лист Excel2007-...)...")
             self._send_hotkey(self.win32con.VK_MENU, 0x54)  # Alt + T
             time.sleep(0.2)
-            self._send_hotkey(self.win32con.VK_DOWN)
+            self._send_hotkey(self.win32con.VK_HOME)  # 1: Табличный документ (*.mxl)
+            time.sleep(0.1)
+            self._send_hotkey(self.win32con.VK_DOWN)  # 2: Лист Excel2007-... (*.xlsx)
             time.sleep(0.1)
             self._send_hotkey(self.win32con.VK_RETURN)
-            time.sleep(0.2)
+            time.sleep(0.3)
 
-        # 2. Переход в поле имени файла (Alt + N / Alt + И)
-        self._send_hotkey(self.win32con.VK_MENU, 0x4E)  # Alt + N
-        time.sleep(0.2)
+        # -------------------------------------------------------------
+        # 2. Гарантированный фокус и ввод пути в поле «Имя файла:»
+        # -------------------------------------------------------------
+        edit_focused = False
+        if save_dlg:
+            try:
+                for ed in save_dlg.descendants(control_type="Edit"):
+                    auto_id = getattr(ed.element_info, "automation_id", "")
+                    ed_name = (ed.element_info.name or ed.window_text() or "").lower()
+                    if auto_id in ("1001", "1148", "FileNameControlHost") or "имя" in ed_name or "name" in ed_name:
+                        print("[1С:Windows] Фокусировка поля «Имя файла» (UIA)...")
+                        ed.click_input()
+                        edit_focused = True
+                        break
+            except Exception as e:
+                logger.debug("Поиск Edit имени файла: %s", e)
 
-        # 3. Ввод пути сохранения в диалог
+        if not edit_focused and save_dlg:
+            try:
+                r = save_dlg.rectangle()
+                # Координата клика по полю ввода «Имя файла» (~60 пикселей выше кнопки Сохранить)
+                print("[1С:Windows] Клик по полю «Имя файла» по координатам окна...")
+                self.pywinauto.mouse.click(coords=(r.left + 250, r.bottom - 110))
+                edit_focused = True
+            except Exception:
+                pass
+
+        if not edit_focused:
+            # Горячие клавиши перехода в поле имени файла:
+            # Alt + И (Russian layout: клавиша B / 0x42), затем Alt + N (English layout: 0x4E)
+            self._send_hotkey(self.win32con.VK_MENU, 0x42)
+            time.sleep(0.1)
+            self._send_hotkey(self.win32con.VK_MENU, 0x4E)
+            time.sleep(0.1)
+
+        print(f"[1С:Windows] Вставка пути сохранения: {target_filepath}...")
         self._select_all_and_paste(target_filepath)
-        time.sleep(0.4)
+        time.sleep(0.5)
 
+        # -------------------------------------------------------------
+        # 3. Нажатие кнопки «Сохранить»
+        # -------------------------------------------------------------
+        save_btn = None
         if save_dlg:
             try:
                 for btn in save_dlg.descendants(control_type="Button"):
                     txt = (btn.element_info.name or btn.window_text() or "").strip().lower()
-                    if txt == "сохранить":
-                        btn.click_input()
+                    auto_id = getattr(btn.element_info, "automation_id", "")
+                    if txt == "сохранить" or auto_id == "1":
+                        save_btn = btn
                         break
             except Exception:
-                self._hotkey_enter()
+                pass
+
+        if save_btn:
+            print("[1С:Windows] Нажатие кнопки «Сохранить»...")
+            save_btn.click_input()
         else:
+            print("[1С:Windows] Подтверждение сохранения (Enter)...")
             self._hotkey_enter()
 
         time.sleep(1.0)
-        # Подтверждение перезаписи (если выскочит "Заменить существующий файл?")
-        confirm_dlg = self._find_dialog("подтверд", timeout=1.0)
+        # Подтверждение перезаписи (если выскочит диалог "Заменить существующий файл?")
+        confirm_dlg = self._find_dialog("подтверд", timeout=1.2)
         if confirm_dlg:
+            print("[1С:Windows] Подтверждение замены файла (Enter)...")
             self._hotkey_enter()
         else:
             time.sleep(0.3)
 
-        # Ожидание физической записи файла на диск (до 25 секунд)
+        # -------------------------------------------------------------
+        # 4. Ожидание записи файла на диск и проверка формата
+        # -------------------------------------------------------------
         file_ready = False
         for _ in range(25):
             if os.path.exists(target_filepath) and os.path.getsize(target_filepath) > 0:
-                # Проверяем, что файл закончил записываться
-                time.sleep(0.5)
+                time.sleep(0.6)
                 file_ready = True
                 break
             time.sleep(1.0)
@@ -1054,7 +1109,7 @@ class WindowsOneCExporter(BaseOneCExporter):
         if not file_ready:
             raise RuntimeError(
                 f"Файл {target_filepath} не был сохранен на рабочий стол!\n"
-                "Проверьте права на запись или открытые диалоговые окна 1С."
+                "Проверьте активность диалогового окна 1С и права на запись."
             )
 
         # Проверяем сигнатуру XLSX (ZIP PK\x03\x04)
@@ -1064,11 +1119,17 @@ class WindowsOneCExporter(BaseOneCExporter):
             if sig == b"PK\x03\x04":
                 print(f"[1С:Windows] ✓ Таблица успешно сохранена в формате Excel (XLSX): {target_filepath}")
             else:
-                logger.warning("Файл %s имеет сигнатуру %s (не PK). Проверьте тип файла 1С.", target_filepath, sig)
+                logger.warning(
+                    "Внимание: файл %s имеет сигнатуру %s (не PK). 1С сохранила его в другом формате.",
+                    target_filepath,
+                    sig,
+                )
         except Exception:
             pass
 
-        # 4. Закрытие временной вкладки (только если close_tab_after=True!)
+        # -------------------------------------------------------------
+        # 5. Закрытие временной вкладки сформированного списка
+        # -------------------------------------------------------------
         if close_tab_after:
             print("[1С:Windows] Закрытие временной сформированной вкладки (Ctrl+F4)...")
             time.sleep(0.5)
