@@ -1133,43 +1133,77 @@ class WindowsOneCExporter(BaseOneCExporter):
         # -------------------------------------------------------------
         print(f"[1С:Windows] Вставка пути сохранения: {target_filepath}...")
 
-        # 1. Поиск контрола «Имя файла» (FileNameControlHost)
-        fn_combo = None
+        # Шаг 2.1: Ищем текстовую метку «Имя файла:»
+        lbl_target = None
         try:
-            for el in save_dlg.descendants():
-                auto_id = getattr(el.element_info, "automation_id", "")
-                name = (el.element_info.name or el.window_text() or "").lower()
-                if auto_id in ("FileNameControlHost", "1001", "1148") or "имя файла" in name:
-                    fn_combo = el
+            for el in save_dlg.descendants(control_type="Text"):
+                t = (el.element_info.name or el.window_text() or "").strip().lower()
+                if "имя файла" in t or "file name" in t:
+                    lbl_target = el
                     break
         except Exception as e:
-            logger.debug("Поиск поля 'Имя файла': %s", e)
+            logger.debug("Поиск метки 'Имя файла': %s", e)
 
-        # 2. Фокусировка поля ввода (БЕЗ клика по списку файлов!)
-        if fn_combo:
-            try:
-                fn_combo.set_focus()
-            except Exception:
+        # Шаг 2.2: Ищем ComboBox поля ввода (верхний ComboBox в нижней части диалога)
+        fn_control = None
+        try:
+            bottom_combos = []
+            for cb in save_dlg.descendants(control_type="ComboBox"):
                 try:
-                    # Клик строго по центру самого контрола «Имя файла»
-                    r = fn_combo.rectangle()
-                    self.pywinauto.mouse.click(coords=(r.left + 50, r.top + r.height() // 2))
+                    r = cb.rectangle()
+                    if r.top >= dlg_r.bottom - 170:
+                        bottom_combos.append(cb)
                 except Exception:
-                    pass
-            time.sleep(0.1)
+                    continue
+            bottom_combos.sort(key=lambda c: c.rectangle().top)
+            if bottom_combos:
+                fn_control = bottom_combos[0]
+        except Exception as e:
+            logger.debug("Поиск ComboBox имени файла: %s", e)
 
-            # Прямая установка текста через Win32 WM_SETTEXT
+        # Шаг 2.3: Надежная фокусировка поля «Имя файла» (клик прямо в белое поле ввода)
+        focused = False
+        if lbl_target:
             try:
-                self.win32gui.SendMessage(fn_combo.handle, self.win32con.WM_SETTEXT, 0, target_filepath)
+                r_lbl = lbl_target.rectangle()
+                # Поле ввода расположено сразу справа от метки «Имя файла:»
+                click_x = r_lbl.right + 60
+                click_y = r_lbl.top + r_lbl.height() // 2
+                print(f"[1С:Windows] Фокусировка поля «Имя файла» (клик справа от метки: {click_x}, {click_y})...")
+                self.pywinauto.mouse.click(coords=(click_x, click_y))
+                focused = True
+                time.sleep(0.15)
+            except Exception as e:
+                logger.debug("Клик справа от метки: %s", e)
+
+        if not focused and fn_control:
+            try:
+                r = fn_control.rectangle()
+                self.pywinauto.mouse.click(coords=(r.left + 50, r.top + r.height() // 2))
+                focused = True
+                time.sleep(0.15)
+            except Exception:
+                pass
+
+        if not focused:
+            # Горячая клавиша перехода к «Имя файла» в русской Windows: Alt + И (клавиша B = 0x42)
+            self._send_hotkey(self.win32con.VK_MENU, 0x42)
+            time.sleep(0.15)
+
+        # Шаг 2.4: Прямая установка текста через Win32 WM_SETTEXT, если доступен дескриптор
+        if fn_control:
+            try:
+                self.win32gui.SendMessage(fn_control.handle, self.win32con.WM_SETTEXT, 0, target_filepath)
+                for ch in fn_control.descendants():
+                    try:
+                        self.win32gui.SendMessage(ch.handle, self.win32con.WM_SETTEXT, 0, target_filepath)
+                    except Exception:
+                        pass
                 time.sleep(0.1)
             except Exception:
                 pass
-        else:
-            # Fallback: горячая клавиша перехода к «Имя файла» в русских Windows (Alt + И)
-            self._send_hotkey(self.win32con.VK_MENU, 0x42)
-            time.sleep(0.1)
 
-        # 3. Надежная вставка через буфер обмена: Ctrl+A -> Ctrl+V
+        # Шаг 2.5: Надежная вставка через буфер обмена: Ctrl+A -> Ctrl+V
         self._select_all_and_paste(target_filepath)
         time.sleep(0.4)
 
