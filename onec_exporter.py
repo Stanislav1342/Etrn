@@ -1132,37 +1132,46 @@ class WindowsOneCExporter(BaseOneCExporter):
         # 2. Поиск поля «Имя файла:» и ввод полного пути сохранения
         # -------------------------------------------------------------
         print(f"[1С:Windows] Вставка пути сохранения: {target_filepath}...")
-        edit_control = None
+
+        # 1. Поиск контрола «Имя файла» (FileNameControlHost)
+        fn_combo = None
         try:
-            for ed in save_dlg.descendants(control_type="Edit"):
-                r = ed.rectangle()
-                # Поле «Имя файла» расположено строго в нижней части диалога (выше кнопок)
-                if dlg_r.bottom - 170 <= r.top <= dlg_r.bottom - 70:
-                    edit_control = ed
+            for el in save_dlg.descendants():
+                auto_id = getattr(el.element_info, "automation_id", "")
+                name = (el.element_info.name or el.window_text() or "").lower()
+                if auto_id in ("FileNameControlHost", "1001", "1148") or "имя файла" in name:
+                    fn_combo = el
                     break
         except Exception as e:
-            logger.debug("Поиск Edit имени файла: %s", e)
+            logger.debug("Поиск поля 'Имя файла': %s", e)
 
-        # 1. Прямое заполнение через Win32 WM_SETTEXT
-        if edit_control:
+        # 2. Фокусировка поля ввода (БЕЗ клика по списку файлов!)
+        if fn_combo:
             try:
-                self.win32gui.SendMessage(edit_control.handle, self.win32con.WM_SETTEXT, 0, target_filepath)
+                fn_combo.set_focus()
+            except Exception:
+                try:
+                    # Клик строго по центру самого контрола «Имя файла»
+                    r = fn_combo.rectangle()
+                    self.pywinauto.mouse.click(coords=(r.left + 50, r.top + r.height() // 2))
+                except Exception:
+                    pass
+            time.sleep(0.1)
+
+            # Прямая установка текста через Win32 WM_SETTEXT
+            try:
+                self.win32gui.SendMessage(fn_combo.handle, self.win32con.WM_SETTEXT, 0, target_filepath)
                 time.sleep(0.1)
-            except Exception as e:
-                logger.debug("WM_SETTEXT: %s", e)
-
-        # 2. Фокусировка кликом и вставка через буфер обмена
-        if edit_control:
-            try:
-                edit_control.click_input()
             except Exception:
                 pass
         else:
-            self.pywinauto.mouse.click(coords=(dlg_r.left + 250, dlg_r.bottom - 110))
+            # Fallback: горячая клавиша перехода к «Имя файла» в русских Windows (Alt + И)
+            self._send_hotkey(self.win32con.VK_MENU, 0x42)
+            time.sleep(0.1)
 
-        time.sleep(0.15)
+        # 3. Надежная вставка через буфер обмена: Ctrl+A -> Ctrl+V
         self._select_all_and_paste(target_filepath)
-        time.sleep(0.3)
+        time.sleep(0.4)
 
         # -------------------------------------------------------------
         # 3. Нажатие кнопки «Сохранить»
