@@ -262,52 +262,62 @@ class WindowsOneCExporter(BaseOneCExporter):
     # Надежный поиск диалогов в Windows (Win32 EnumWindows + Desktop UIA)
     # ---------------------------------------------------------------------
     def _is_dialog_open(self, title_sub: str) -> bool:
-        """Проверяет через Win32 EnumWindows, открыто ли окно с указанной подстрокой."""
+        """Проверяет через Win32 EnumWindows, открыто ли диалоговое окно с указанной подстрокой."""
         try:
             pattern = re.compile(rf".*{re.escape(title_sub)}.*", re.IGNORECASE)
             elems = self.pywinauto.findwindows.find_elements(title_re=pattern)
-            return len(elems) > 0
+            main_hwnd = self.main_win.handle if self.main_win else None
+            for el in elems:
+                if main_hwnd and el.handle == main_hwnd:
+                    continue
+                return True
+            return False
         except Exception:
             return False
 
     def _find_dialog(self, title_sub: str, timeout: float = 8.0):
         """
-        Гарантированно находит любое диалоговое окно по подстроке заголовка.
-        Использует прямой системный опрос окон Win32 EnumWindows, что исключает
-        проблемы кэширования в pywinauto Application.
+        Гарантированно находит отдельное диалоговое окно по подстроке заголовка.
+        Ищет ТОЛЬКО среди окон верхнего уровня (Win32 EnumWindows / Desktop UIA),
+        исключая главное окно 1С и его внутренние элементы управления (кнопки, плашки).
         """
         end_time = time.time() + timeout
         pattern = re.compile(rf".*{re.escape(title_sub)}.*", re.IGNORECASE)
+        main_hwnd = None
+        if self.main_win:
+            try:
+                main_hwnd = self.main_win.handle
+            except Exception:
+                pass
 
         while time.time() < end_time:
-            # 1. Поиск через Win32 EnumWindows (находит любые модальные и дочерние окна на уровне ОС)
+            # 1. Поиск через Win32 EnumWindows (на уровне ОС среди окон верхнего уровня)
             try:
                 handles = self.pywinauto.findwindows.find_elements(title_re=pattern)
-                if handles:
-                    hwnd = handles[0].handle
-                    app_dlg = self.Application(backend="uia").connect(handle=hwnd)
-                    return app_dlg.window(handle=hwnd)
+                for h in handles:
+                    if main_hwnd and h.handle == main_hwnd:
+                        continue
+                    app_dlg = self.Application(backend="uia").connect(handle=h.handle)
+                    w = app_dlg.window(handle=h.handle)
+                    return w
             except Exception:
                 pass
 
             # 2. Поиск через Desktop UIA
             try:
                 for w in self.Desktop(backend="uia").windows():
-                    t = (w.element_info.name or w.window_text() or "").strip()
-                    if pattern.search(t):
-                        return w
-            except Exception:
-                pass
-
-            # 3. Поиск среди дочерних элементов главного окна 1С
-            if self.main_win:
-                try:
-                    for w in self.main_win.descendants():
+                    try:
+                        if main_hwnd and w.handle == main_hwnd:
+                            continue
                         t = (w.element_info.name or w.window_text() or "").strip()
                         if pattern.search(t):
-                            return w
-                except Exception:
-                    pass
+                            ctrl_type = getattr(w.element_info, "control_type", "")
+                            if ctrl_type in ("Window", "Pane", ""):
+                                return w
+                    except Exception:
+                        continue
+            except Exception:
+                pass
 
             time.sleep(0.3)
         return None
@@ -485,6 +495,16 @@ class WindowsOneCExporter(BaseOneCExporter):
         3. Нажимает кнопку [ОК].
         """
         print("[1С:Windows] Настройка колонок «Маршрутный лист» (Номер, Водитель, Перевозчик, Модель расчетов)...")
+        try:
+            dlg.set_focus()
+        except Exception:
+            pass
+        try:
+            self.win32gui.SetForegroundWindow(dlg.handle)
+        except Exception:
+            pass
+        time.sleep(0.3)
+
         r = dlg.rectangle()
 
         # Шаг 1: Нажатие кнопки «Снять все флажки»
@@ -597,43 +617,40 @@ class WindowsOneCExporter(BaseOneCExporter):
         # Даем 1С завершить фоновые запросы фильтрации
         time.sleep(1.5)
 
-        # 1. Проверяем, может диалог «Вывести список» уже случайно открыт
-        dlg = self._find_dialog("вывести список", timeout=1.0)
+        # 1. Нажатие кнопки «Вывести список...» на панели инструментов
+        print("[1С:Windows] Нажатие кнопки «Вывести список...» на панели инструментов...")
+        btn_clicked = False
+        try:
+            for btn in self.main_win.descendants(control_type="Button"):
+                txt = (btn.element_info.name or btn.window_text() or btn.element_info.help_text or "").strip().lower()
+                if "вывести список" in txt:
+                    btn.click_input()
+                    btn_clicked = True
+                    break
+        except Exception as e:
+            logger.debug("UIA поиск 'Вывести список': %s", e)
 
-        # 2. Если нет — кликаем по кнопке «Вывести список...»
-        if not dlg:
-            print("[1С:Windows] Нажатие кнопки «Вывести список...» на панели инструментов...")
-            btn_clicked = False
-            try:
-                for btn in self.main_win.descendants(control_type="Button"):
-                    txt = (btn.element_info.name or btn.window_text() or "").strip().lower()
-                    if "вывести список" in txt:
-                        btn.click_input()
-                        btn_clicked = True
-                        break
-            except Exception:
-                pass
+        if not btn_clicked:
+            # Координата кнопки тулбара (x ~ 1012, y ~ 88)
+            self.pywinauto.mouse.click(coords=(1012, 88))
 
-            if not btn_clicked:
-                # Координата кнопки тулбара (x ~ 1012, y ~ 88)
-                self.pywinauto.mouse.click(coords=(1012, 88))
+        dlg = self._find_dialog("вывести список", timeout=5.0)
 
-            dlg = self._find_dialog("вывести список", timeout=5.0)
-
-        # 3. Если после первого клика не открылся — повторный клик
+        # 2. Повторная попытка клика по тулбару, если диалог не открылся
         if not dlg:
             print("[1С:Windows] Повторный клик по кнопке «Вывести список...»...")
             self.pywinauto.mouse.click(coords=(1012, 88))
             dlg = self._find_dialog("вывести список", timeout=4.0)
 
-        # 4. Fallback: вызов через меню Еще ▾ списка
+        # 3. Fallback: вызов через меню таблицы «Еще ▾»
         if not dlg:
             print("[1С:Windows] Вызов «Вывести список...» через меню таблицы «Еще ▾»...")
             self._click_table_more_button()
             time.sleep(0.6)
             for w in self.Desktop(backend="uia").windows():
                 for el in w.descendants():
-                    if "вывести список" in (el.element_info.name or el.window_text() or "").lower():
+                    txt = (el.element_info.name or el.window_text() or "").strip().lower()
+                    if "вывести список" in txt:
                         el.click_input()
                         break
             dlg = self._find_dialog("вывести список", timeout=6.0)
@@ -641,10 +658,10 @@ class WindowsOneCExporter(BaseOneCExporter):
         if not dlg:
             raise RuntimeError("Не открылся диалог «Вывести список» в разделе «Маршрутный лист»!")
 
-        # 5. Настройка колонок в диалоге
+        # 4. Настройка колонок в диалоге
         self._configure_ml_columns(dlg)
 
-        # 6. Сохранение файла и закрытие вкладки «Информация по МЛ»
+        # 5. Сохранение файла и закрытие вкладки «Информация по МЛ»
         self._save_in_dialog(target_filepath)
 
     # ---------------------------------------------------------------------
@@ -730,6 +747,16 @@ class WindowsOneCExporter(BaseOneCExporter):
         Остальные (Номер, Дата, Грузополучатель, Перевозчик, Текущий шаг, Состояние ЭДО) остаются включенными.
         """
         print("[1С:Windows] Настройка колонок «ЭТРН» (снятие: Внутренний номер, Грузоотправитель, Комментарий)...")
+        try:
+            dlg.set_focus()
+        except Exception:
+            pass
+        try:
+            self.win32gui.SetForegroundWindow(dlg.handle)
+        except Exception:
+            pass
+        time.sleep(0.3)
+
         r = dlg.rectangle()
 
         # Фокусируем список колонок
