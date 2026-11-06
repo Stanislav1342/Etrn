@@ -1,9 +1,46 @@
-import pandas as pd
-import openpyxl
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.utils import get_column_letter
+import io
 import os
+import tempfile
 from datetime import datetime, timedelta
+from typing import BinaryIO, Optional, Union
+
+import openpyxl
+import pandas as pd
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
+
+
+def _read_excel_or_csv(source: Union[str, os.PathLike, BinaryIO, bytes], is_percent: bool = False) -> pd.DataFrame:
+    """Универсально читает DataFrame из пути к файлу, байтов или файлового потока."""
+    if isinstance(source, bytes):
+        source = io.BytesIO(source)
+    elif hasattr(source, "read") and hasattr(source, "seek"):
+        source.seek(0)
+    elif isinstance(source, (str, os.PathLike)):
+        if not os.path.exists(source):
+            raise FileNotFoundError(f"Файл не найден по пути: {source}")
+
+    if is_percent:
+        return pd.read_excel(source, header=None, engine='openpyxl')
+
+    if isinstance(source, (str, os.PathLike)) and str(source).lower().endswith('.csv'):
+        return pd.read_csv(source)
+
+    try:
+        return pd.read_excel(source, engine='openpyxl')
+    except Exception as e:
+        if isinstance(source, (str, os.PathLike)):
+            try:
+                with open(source, 'rb') as f:
+                    sig = f.read(8)
+                if not sig.startswith(b'PK'):
+                    raise ValueError(
+                        f"Файл '{source}' сохранен 1С не как XLSX (сигнатура: {sig}). "
+                        "Возможно, 1С сохранила его в формате MXL. Перезапустите выгрузку."
+                    ) from e
+            except Exception:
+                pass
+        raise e
 
 def determine_title(row):
     """Определение номера титула на основе текущего шага и состояния ЭДО."""
@@ -74,45 +111,38 @@ def style_worksheet(ws):
     ws.auto_filter.ref = f"A1:{get_column_letter(ws.max_column)}{ws.max_row}"
 
 
-def process_and_style_etrn(input_filepath, model_filepath, percent_filepath, output_filepath):
-    print(f"\nЧтение исходного файла: {input_filepath}...")
+def process_and_style_etrn(
+    input_filepath: Union[str, os.PathLike, BinaryIO, bytes],
+    model_filepath: Union[str, os.PathLike, BinaryIO, bytes],
+    percent_filepath: Union[str, os.PathLike, BinaryIO, bytes],
+    output_filepath: Optional[Union[str, os.PathLike]] = None,
+) -> bytes:
+    """
+    Обрабатывает исходные таблицы ЭТРН, моделей расчетов и процента,
+    формирует стилизованный Excel-файл с двумя листами: «ЭТРН» и «Отчет».
     
-    if not os.path.exists(input_filepath):
-        print(f"\n[ОШИБКА] Файл не найден по пути: {input_filepath}")
-        return
-    if not os.path.exists(model_filepath):
-        print(f"\n[ОШИБКА] Файл с моделями расчетов не найден по пути: {model_filepath}")
-        return
-    if not os.path.exists(percent_filepath):
-        print(f"\n[ОШИБКА] Файл 'Процент.xlsx' не найден по пути: {percent_filepath}")
-        return
+    Поддерживает:
+    - Пути к файлам на диске (str, Path)
+    - Файловые потоки в памяти (io.BytesIO, UploadFile.file)
+    - Байтовые данные (bytes)
+    
+    Возвращает:
+    - bytes: Содержимое готового XLSX-документа.
+    - При указании output_filepath также сохраняет файл на диск.
+    """
+    source_name = str(input_filepath) if isinstance(input_filepath, (str, os.PathLike)) else "память"
+    print(f"\n[ЭТРН-Оптимизатор] Чтение исходных данных ЭТРН ({source_name})...")
+    df = _read_excel_or_csv(input_filepath)
+
+    model_name = str(model_filepath) if isinstance(model_filepath, (str, os.PathLike)) else "память"
+    print(f"[ЭТРН-Оптимизатор] Чтение файла моделей расчетов ({model_name})...")
+    model_df = _read_excel_or_csv(model_filepath)
+
+    percent_name = str(percent_filepath) if isinstance(percent_filepath, (str, os.PathLike)) else "память"
+    print(f"[ЭТРН-Оптимизатор] Чтение файла отчета подписания ({percent_name})...")
+    percent_df = _read_excel_or_csv(percent_filepath, is_percent=True)
 
     # --- ЭТАП 1: ОБРАБОТКА ДАННЫХ (pandas) ---
-    _, ext = os.path.splitext(input_filepath)
-    if ext.lower() == '.csv':
-        df = pd.read_csv(input_filepath)
-    else:
-        try:
-            df = pd.read_excel(input_filepath, engine='openpyxl')
-        except Exception as e:
-            try:
-                with open(input_filepath, 'rb') as f:
-                    sig = f.read(8)
-                if not sig.startswith(b'PK'):
-                    raise ValueError(
-                        f"Файл '{input_filepath}' сохранен 1С не как XLSX (сигнатура: {sig}). "
-                        "Возможно, 1С сохранила его в формате MXL. Перезапустите выгрузку."
-                    ) from e
-            except Exception:
-                pass
-            raise e
-
-    print(f"Подтягивание данных из файла: {model_filepath}...")
-    try:
-        model_df = pd.read_excel(model_filepath, engine='openpyxl')
-    except Exception as e:
-        raise ValueError(f"Не удалось прочитать '{model_filepath}' как Excel: {e}") from e
-
     df = df[df['Состояние ЭДО'].astype(str).str.strip() != 'Завершен'].copy()
 
     df['Перевозчик'] = df['Перевозчик'].astype(str).str.strip()
@@ -120,14 +150,14 @@ def process_and_style_etrn(input_filepath, model_filepath, percent_filepath, out
     model_df['Номер'] = model_df['Номер'].astype(str).str.strip()
 
     df['Короткий номер'] = (
-    df['Номер']
-    .fillna('')
-    .astype(str)
-    .str.split('.')
-    .str[0]
-    .replace('nan', '')
-    .str.strip()
-    )   
+        df['Номер']
+        .fillna('')
+        .astype(str)
+        .str.split('.')
+        .str[0]
+        .replace('nan', '')
+        .str.strip()
+    )
 
     model_df = model_df[['Номер', 'Водитель', 'Перевозчик', 'Модель расчетов']].drop_duplicates(subset=['Номер', 'Перевозчик'])
 
@@ -145,12 +175,11 @@ def process_and_style_etrn(input_filepath, model_filepath, percent_filepath, out
     df['Модель расчетов'] = df['Модель расчетов'].fillna('')
 
     # --- ЭТАП 2: ФОРМИРОВАНИЕ ОТЧЕТА ---
-    print("Формирование сводного отчета по водителям...")
+    print("[ЭТРН-Оптимизатор] Формирование сводного отчета по водителям...")
     report_data = []
     
     # Группируем данные по связке Перевозчик + Водитель + Модель расчетов
     for (date, carrier, driver, model), group in df.groupby(['Дата', 'Перевозчик', 'Водитель', 'Модель расчетов']):
-        
         count_2 = (group['Не подписанный титул №'] == 2).sum()
         count_3 = (group['Не подписанный титул №'] == 3).sum()
         count_4 = (group['Не подписанный титул №'] == 4).sum()
@@ -172,14 +201,7 @@ def process_and_style_etrn(input_filepath, model_filepath, percent_filepath, out
     # =================================================================
     # --- ЭТАП 2.1: ДОБАВЛЕНИЕ СРЕДНЕГО ВРЕМЕНИ ИЗ ФАЙЛА ПРОЦЕНТ ---
     # =================================================================
-    print(f"Подтягивание данных из файла: {percent_filepath}...")
-    # Читаем без шапки, так как в 1С шапка многоуровневая
-    try:
-        percent_df = pd.read_excel(percent_filepath, header=None, engine='openpyxl')
-    except Exception as e:
-        raise ValueError(f"Не удалось прочитать '{percent_filepath}' как Excel: {e}") from e
-    
-    # Динамически ищем колонку "Среднее время (мин)" (нам нужна самая первая)
+    print("[ЭТРН-Оптимизатор] Расчет среднего времени подписания перевозчиков...")
     time_col_idx = 2 
     for r in range(min(15, percent_df.shape[0])):
         for c in range(percent_df.shape[1]):
@@ -191,21 +213,17 @@ def process_and_style_etrn(input_filepath, model_filepath, percent_filepath, out
             continue
         break
         
-    # Собираем словарь только для тех перевозчиков, которые есть в нашем отчете
     valid_carriers = set(report_df['Перевозчик'].unique())
     carrier_times = {}
     
     for r in range(percent_df.shape[0]):
         val_a = str(percent_df.iloc[r, 0]).strip()
-        # Если значение в первом столбце совпадает с именем перевозчика
         if val_a in valid_carriers:
             time_val = percent_df.iloc[r, time_col_idx]
-            # Убираем пустые/NaN значения
             if pd.isna(time_val):
                 time_val = ''
             carrier_times[val_a] = time_val
             
-    # Добавляем новую колонку в самый конец листа Отчет
     report_df['Среднее время (мин)'] = report_df['Перевозчик'].map(carrier_times).fillna('')
 
     # --- ЭТАП 3: РАССТАНОВКА СТОЛБЦОВ В ОСНОВНОМ ЛИСТЕ ---
@@ -223,26 +241,39 @@ def process_and_style_etrn(input_filepath, model_filepath, percent_filepath, out
     cols.insert(insert_idx + 1, 'Модель расчетов')
     df = df[cols]
 
-    # --- ЭТАП 4: СОХРАНЕНИЕ 2 ЛИСТОВ И КОСМЕТИКА ---
-    temp_filename = 'temp_etrn.xlsx'
-    
-    # Сохраняем сразу два листа через ExcelWriter
-    with pd.ExcelWriter(temp_filename, engine='openpyxl') as writer:
-        df.to_excel(writer, sheet_name='ЭТРН', index=False)
-        report_df.to_excel(writer, sheet_name='Отчет', index=False)
-    
-    print("Наведение красоты (стили, границы)...")
-    wb = openpyxl.load_workbook(temp_filename)
-    
-    # Проходимся по всем листам и применяем единый стиль
-    for sheet_name in wb.sheetnames:
-        style_worksheet(wb[sheet_name])
+    # --- ЭТАП 4: СОХРАНЕНИЕ 2 ЛИСТОВ И КОСМЕТИКА (ПОТОКОБЕЗОПАСНО) ---
+    temp_fd, temp_path = tempfile.mkstemp(suffix=".xlsx")
+    os.close(temp_fd)
 
-    wb.save(output_filepath)
-    if os.path.exists(temp_filename):
-        os.remove(temp_filename)
+    try:
+        with pd.ExcelWriter(temp_path, engine='openpyxl') as writer:
+            df.to_excel(writer, sheet_name='ЭТРН', index=False)
+            report_df.to_excel(writer, sheet_name='Отчет', index=False)
         
-    print(f"\nУспешно завершено! Итоговый файл сохранен:\n{output_filepath}\n")
+        print("[ЭТРН-Оптимизатор] Стилизация документа (автоширина, автофильтр, шрифты)...")
+        wb = openpyxl.load_workbook(temp_path)
+        for sheet_name in wb.sheetnames:
+            style_worksheet(wb[sheet_name])
+
+        out_stream = io.BytesIO()
+        wb.save(out_stream)
+        result_bytes = out_stream.getvalue()
+
+        if output_filepath:
+            out_str = str(output_filepath)
+            os.makedirs(os.path.dirname(os.path.abspath(out_str)), exist_ok=True)
+            with open(out_str, "wb") as f:
+                f.write(result_bytes)
+            print(f"[ЭТРН-Оптимизатор] ✓ Итоговый отчет сохранен: {out_str}")
+
+        return result_bytes
+
+    finally:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
 
 
 def get_date_from_user():
