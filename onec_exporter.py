@@ -871,11 +871,8 @@ class WindowsOneCExporter(BaseOneCExporter):
     def _verify_etrn_period_pill(self, d_from_str: str, d_to_str: str) -> Tuple[bool, str]:
         """
         Проверяет текст на плашке периода списка «ЭТРН» по всей ширине панели инструментов.
-        Возвращает (True, pill_text), если период валиден.
-        Возвращает (False, pill_text) ТОЛЬКО если обнаружен опасный дефект (начинается с '-').
+        Возвращает (True, pill_text), если плашка содержит требуемую дату начала d_from_str.
         """
-        found_any_pill = False
-        last_txt = ""
         try:
             for el in self.main_win.descendants():
                 try:
@@ -884,31 +881,24 @@ class WindowsOneCExporter(BaseOneCExporter):
                     if 30 <= r.top <= 160:
                         txt = (el.element_info.name or el.window_text() or "").strip()
                         if re.search(r"\d{2}\.\d{2}\.\d{4}", txt) or ("-" in txt and len(txt) <= 40):
-                            last_txt = txt
-                            # Критический дефект: начинается с '-' без начальной даты (вешает 1С)
+                            # Дефект: начинается с '-' без начальной даты (вешает 1С)
                             if txt.startswith("-"):
                                 return False, txt
-                            if d_from_str in txt or d_to_str in txt:
+                            if d_from_str in txt:
                                 return True, txt
-                            found_any_pill = True
                 except Exception:
                     continue
         except Exception:
             pass
-
-        if found_any_pill:
-            return True, last_txt
-        # Если диалог периода был успешно заполнен и закрыт, но текст плашки скрыт в UIA
-        return True, f"{d_from_str} - {d_to_str}"
+        return False, "Плашка с новой датой не обнаружена"
 
     def _set_etrn_period(self, date_from: datetime, date_to: datetime) -> None:
         """
         Устанавливает период для списка ЭТРН через диалог «Выберите период».
         Обеспечивает 100% защиту от зависания 1С:
-        - Клик по плашке периода со смещением влево (защита от крестика [x] очистки)
-        - Прямой ввод в Edit-элементы «Дата начала» и «Дата окончания»
-        - Верификация и самовосстановление: недопущение периода вида '- 03.11.2026'
-        - Жесткий запрет выгрузки без подтвержденного периода (защита от зависания базы)
+        - Всегда открывает окно выбора периода
+        - Точно находит поля ввода дат и вставляет требуемый период d_from_str и d_to_str
+        - Подтверждает выбор и верифицирует плашку с новой датой
         """
         d_from_str = date_from.strftime("%d.%m.%Y")
         d_to_str = date_to.strftime("%d.%m.%Y")
@@ -923,14 +913,14 @@ class WindowsOneCExporter(BaseOneCExporter):
         for attempt in range(1, max_attempts + 1):
             opened_dialog = False
 
-            # 1. Попытка клика по уже существующей плашке периода
+            # 1. Попытка клика по существующей плашке периода на тулбаре
             try:
                 for el in self.main_win.descendants():
                     try:
                         r = el.rectangle()
-                        if r.left <= 450 and 50 <= r.top <= 160:
+                        if 30 <= r.top <= 160:
                             txt = (el.element_info.name or el.window_text() or "").strip()
-                            if re.search(r"\d{2}\.\d{2}\.\d{4}", txt) or "-" in txt:
+                            if re.search(r"\d{2}\.\d{2}\.\d{4}", txt) or ("-" in txt and len(txt) <= 40):
                                 click_x = r.left + 25
                                 click_y = r.top + r.height() // 2
                                 print(f"[1С:Windows] Клик по плашке периода «{txt}» в coords=({click_x}, {click_y})...")
@@ -974,52 +964,92 @@ class WindowsOneCExporter(BaseOneCExporter):
                 pass
             time.sleep(0.3)
 
-            # 4. Точный ввод дат в Edit-поля диалога
-            edits = []
-            try:
-                for e in dlg.descendants(control_type="Edit"):
+            # 4. Ввод дат в диалоге «Выберите период»
+            print(f"[1С:Windows] Ввод дат в диалоге: с {d_from_str} по {d_to_str}...")
+
+            date_inputs = []
+            # Способ А: Элементы, уже содержащие текст даты
+            for el in dlg.descendants():
+                try:
+                    txt = (el.element_info.name or el.window_text() or "").strip()
+                    r = el.rectangle()
+                    if re.search(r"\d{2}\.\d{2}\.\d{4}", txt) and r.width() >= 40 and r.height() >= 12:
+                        date_inputs.append((r.top, r.left, el, r))
+                except Exception:
+                    continue
+
+            # Способ Б: Edit и ComboBox элементы в диалоге
+            if len(date_inputs) < 2:
+                for el in dlg.descendants():
                     try:
-                        r = e.rectangle()
-                        if r.width() >= 30 and r.height() >= 10:
-                            edits.append(e)
+                        ct = el.element_info.control_type
+                        r = el.rectangle()
+                        if ct in ("Edit", "ComboBox") and r.width() >= 45 and 14 <= r.height() <= 40:
+                            if not any(abs(d[0] - r.top) < 6 and abs(d[1] - r.left) < 6 for d in date_inputs):
+                                date_inputs.append((r.top, r.left, el, r))
                     except Exception:
                         continue
-            except Exception:
-                pass
 
-            edits.sort(key=lambda e: (e.rectangle().top, e.rectangle().left))
+            # Способ В: Поиск рядом с метками дат
+            if len(date_inputs) < 2:
+                for el in dlg.descendants():
+                    try:
+                        txt = (el.element_info.name or el.window_text() or "").strip().lower()
+                        r = el.rectangle()
+                        if any(w in txt for w in ("дата начала", "начало", "с:")):
+                            f_rect = self.pywinauto.base_wrapper.Rectangle(r.right + 15, r.top, r.right + 130, r.bottom)
+                            date_inputs.append((r.top, r.right + 15, None, f_rect))
+                        elif any(w in txt for w in ("дата окончания", "окончание", "по:")):
+                            f_rect = self.pywinauto.base_wrapper.Rectangle(r.right + 15, r.top, r.right + 130, r.bottom)
+                            date_inputs.append((r.top, r.right + 15, None, f_rect))
+                    except Exception:
+                        continue
 
-            if len(edits) >= 2:
-                print("[1С:Windows] Заполнение полей даты через Edit («Дата начала» и «Дата окончания»)...")
+            date_inputs.sort(key=lambda x: (x[0], x[1]))
+
+            if len(date_inputs) >= 2:
                 # Поле 1: Дата начала
-                edits[0].click_input()
-                time.sleep(0.15)
+                r0 = date_inputs[0][3]
+                cx0 = r0.left + min(30, r0.width() // 2)
+                cy0 = r0.top + r0.height() // 2
+                print(f"[1С:Windows] Заполнение поля «Дата начала» ({d_from_str}) в coords=({cx0}, {cy0})...")
+                self.pywinauto.mouse.click(coords=(cx0, cy0))
+                time.sleep(0.2)
                 self._select_all_and_paste(d_from_str)
+                time.sleep(0.2)
+                self._hotkey_tab()
                 time.sleep(0.15)
 
                 # Поле 2: Дата окончания
-                edits[1].click_input()
-                time.sleep(0.15)
+                r1 = date_inputs[1][3]
+                cx1 = r1.left + min(30, r1.width() // 2)
+                cy1 = r1.top + r1.height() // 2
+                print(f"[1С:Windows] Заполнение поля «Дата окончания» ({d_to_str}) в coords=({cx1}, {cy1})...")
+                self.pywinauto.mouse.click(coords=(cx1, cy1))
+                time.sleep(0.2)
                 self._select_all_and_paste(d_to_str)
-                time.sleep(0.15)
+                time.sleep(0.2)
             else:
-                print("[1С:Windows] Заполнение дат в диалоге через координаты/Tab...")
                 dlg_r = dlg.rectangle()
-                self.pywinauto.mouse.click(coords=(dlg_r.left + 140, dlg_r.top + 80))
+                print(f"[1С:Windows] Координатный ввод дат в диалоге {dlg_r}...")
+                self.pywinauto.mouse.click(coords=(dlg_r.left + 150, dlg_r.top + 135))
                 time.sleep(0.2)
                 self._select_all_and_paste(d_from_str)
-                time.sleep(0.15)
+                time.sleep(0.2)
                 self._hotkey_tab()
                 time.sleep(0.15)
+                self.pywinauto.mouse.click(coords=(dlg_r.left + 150, dlg_r.top + 175))
+                time.sleep(0.2)
                 self._select_all_and_paste(d_to_str)
-                time.sleep(0.15)
+                time.sleep(0.2)
 
-            # Нажатие кнопки «Выбрать» / «ОК»
+            # Подтверждение диалога: кнопка «Выбрать» / «ОК»
             selected = False
             try:
                 for btn in dlg.descendants(control_type="Button"):
                     btxt = (btn.element_info.name or btn.window_text() or "").strip().lower()
                     if btxt in ("выбрать", "ок"):
+                        print(f"[1С:Windows] Подтверждение выбора периода (кнопка «{btxt}»)...")
                         btn.click_input()
                         selected = True
                         break
@@ -1029,17 +1059,27 @@ class WindowsOneCExporter(BaseOneCExporter):
             if not selected:
                 self._hotkey_enter()
 
-            time.sleep(2.5)
+            time.sleep(2.0)
 
-            # 5. Верификация плашки периода
+            # 5. Верификация плашки периода с новой датой
             is_valid, pill_txt = self._verify_etrn_period_pill(d_from_str, d_to_str)
             if is_valid:
                 print(f"[1С:Windows] ✓ Период списка «ЭТРН» успешно подтвержден: «{pill_txt}».")
                 period_set = True
                 break
             else:
-                print(f"[1С:Windows] ⚠ ВНИМАНИЕ: плашка периода неверна («{pill_txt}»). Повторная попытка {attempt}/{max_attempts}...")
+                print(f"[1С:Windows] ⚠ ВНИМАНИЕ: плашка периода не содержит дату {d_from_str} («{pill_txt}»). Повторная попытка {attempt}/{max_attempts}...")
                 time.sleep(1.0)
+
+        # ЖЕСТКАЯ БЕЗОПАСНОСТЬ: Если период не установлен — ни в коем случае не выгружаем!
+        if not period_set:
+            is_valid, pill_txt = self._verify_etrn_period_pill(d_from_str, d_to_str)
+            if not is_valid:
+                raise RuntimeError(
+                    f"КРИТИЧЕСКАЯ ОШИБКА: Не удалось установить период с {d_from_str} по {d_to_str} в «ЭТРН»! "
+                    f"Текущее значение: «{pill_txt}». "
+                    "Выгрузка остановлена во избежание зависания 1С при выборке всех данных."
+                )
 
         # ЖЕСТКАЯ БЕЗОПАСНОСТЬ: Если период не установлен — ни в коем случае не выгружаем!
         if not period_set:
@@ -1234,24 +1274,53 @@ class WindowsOneCExporter(BaseOneCExporter):
             self._select_all_and_paste(d_to_str)
             time.sleep(0.15)
 
-        # Нажатие кнопки «Сформировать»
-        print("[1С:Windows] Запуск формирования отчета (F5)...")
+        # Фиксация введенных дат (Enter)
+        self._hotkey_enter()
+        time.sleep(0.3)
+
+        # 3. Нажатие кнопки «Сформировать»
+        print("[1С:Windows] Запуск формирования отчета (кнопка «Сформировать» / F5)...")
         formed = False
+        main_r = self.main_win.rectangle()
+
+        # Ищем кнопку «Сформировать» среди всех элементов тулбара отчета
         try:
-            for btn in self.main_win.descendants(control_type="Button"):
-                txt = (btn.element_info.name or btn.window_text() or "").strip().lower()
-                if "сформировать" in txt:
-                    btn.click_input()
-                    formed = True
-                    break
-        except Exception:
-            pass
+            for el in self.main_win.descendants():
+                try:
+                    txt = (el.element_info.name or el.window_text() or "").strip().lower()
+                    r = el.rectangle()
+                    if "сформировать" in txt and 35 <= r.top <= 140:
+                        click_x = r.left + r.width() // 2
+                        click_y = r.top + r.height() // 2
+                        print(f"[1С:Windows] Клик по кнопке «Сформировать» в coords=({click_x}, {click_y})...")
+                        self.pywinauto.mouse.click(coords=(click_x, click_y))
+                        formed = True
+                        break
+                except Exception:
+                    continue
+        except Exception as e:
+            logger.debug("Поиск кнопки Сформировать: %s", e)
 
         if not formed:
-            self._hotkey_f5()
+            # Кнопка «Сформировать» в 1С всегда находится в левом верхнем углу тулбара отчета
+            form_x = max(main_r.left + 50, 70)
+            form_y = main_r.top + 75
+            print(f"[1С:Windows] Координатный клик кнопки «Сформировать» в coords=({form_x}, {form_y})...")
+            self.pywinauto.mouse.click(coords=(form_x, form_y))
 
-        print(f"[1С:Windows] Ожидание формирования отчета (до {self.cfg.report_gen_timeout} сек)...")
-        time.sleep(8.0)
+        # Дополнительно посылаем F5
+        time.sleep(0.3)
+        self._hotkey_f5()
+
+        print(f"[1С:Windows] Ожидание формирования отчета (10 сек)...")
+        time.sleep(10.0)
+
+        # Кликаем в область сформированной таблицы перед сохранением, чтобы передать ей фокус
+        table_focus_x = main_r.left + 250
+        table_focus_y = main_r.top + 250
+        print(f"[1С:Windows] Активация таблицы отчета перед сохранением ({table_focus_x}, {table_focus_y})...")
+        self.pywinauto.mouse.click(coords=(table_focus_x, table_focus_y))
+        time.sleep(0.5)
 
         # 4. Сохранение отчета
         self._save_in_dialog(target_filepath)
