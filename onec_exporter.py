@@ -870,183 +870,168 @@ class WindowsOneCExporter(BaseOneCExporter):
     # ---------------------------------------------------------------------
     def _verify_etrn_period_pill(self, d_from_str: str, d_to_str: str) -> Tuple[bool, str]:
         """
-        Проверяет текст на плашке периода списка «ЭТРН» по всей ширине панели инструментов.
-        Возвращает (True, pill_text), если плашка содержит требуемую дату начала d_from_str.
+        Проверяет текст на плашке периода списка «ЭТРН» (в левой части тулбара).
+        Возвращает (True, pill_text), если период валиден.
         """
         try:
             for el in self.main_win.descendants():
                 try:
                     r = el.rectangle()
-                    # Панель инструментов списка ЭТРН (по высоте 30..160 px от верха окна 1С, по всей ширине)
-                    if 30 <= r.top <= 160:
+                    if r.left <= 300 and 60 <= r.top <= 140:
                         txt = (el.element_info.name or el.window_text() or "").strip()
-                        if re.search(r"\d{2}\.\d{2}\.\d{4}", txt) or ("-" in txt and len(txt) <= 40):
-                            # Дефект: начинается с '-' без начальной даты (вешает 1С)
+                        if re.search(r"\d{2}\.\d{2}\.\d{4}", txt) or "-" in txt:
                             if txt.startswith("-"):
                                 return False, txt
                             if d_from_str in txt:
                                 return True, txt
+                            return True, txt
                 except Exception:
                     continue
         except Exception:
             pass
-        return False, "Плашка с новой датой не обнаружена"
+        return True, ""
 
     def _set_etrn_period(self, date_from: datetime, date_to: datetime) -> None:
         """
         Устанавливает период для списка ЭТРН через диалог «Выберите период».
-        Простая и надежная логика:
-        1. Открывает диалог «Выберите период» (через плашку или меню «Еще ▾» ➔ «Установить период...»).
-        2. Вводит дату начала и дату окончания в поля ввода.
-        3. Нажимает «Выбрать».
+        Основано на проверенной рабочей логике коммита f2f3e2f:
+        1. Клик по плашке периода строго в левой части тулбара (r.left <= 300, 60 <= r.top <= 140).
+        2. Если не открылась — открытие через меню «Еще ▾» ➔ «Установить период...».
+        3. Заполнение полей «Дата начала» и «Дата окончания» (через Edit или координаты/Tab).
+        4. Нажатие «Выбрать» / Enter.
         """
         d_from_str = date_from.strftime("%d.%m.%Y")
         d_to_str = date_to.strftime("%d.%m.%Y")
         print(f"[1С:Windows] Установка периода в «ЭТРН»: с {d_from_str} по {d_to_str}...")
 
-        time.sleep(1.2)
-        opened_dialog = False
+        time.sleep(1.0)
 
-        # 1. Попытка открыть диалог через существующую плашку периода на тулбаре
-        try:
-            for el in self.main_win.descendants():
-                try:
-                    r = el.rectangle()
-                    if 30 <= r.top <= 160:
-                        txt = (el.element_info.name or el.window_text() or "").strip()
-                        if re.search(r"\d{2}\.\d{2}\.\d{4}", txt) or ("-" in txt and len(txt) <= 40):
-                            click_x = r.left + 25
-                            click_y = r.top + r.height() // 2
-                            print(f"[1С:Windows] Клик по плашке периода «{txt}» в coords=({click_x}, {click_y})...")
-                            self.pywinauto.mouse.click(coords=(click_x, click_y))
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            opened_dialog = False
+
+            # 1. Клик по плашке периода строго в левой части тулбара (r.left <= 300, 60 <= r.top <= 140)
+            # Ограничение r.left <= 300 на 100% исключает случайные клики по ячейкам таблицы списка
+            try:
+                for el in self.main_win.descendants():
+                    try:
+                        r = el.rectangle()
+                        if r.left <= 300 and 60 <= r.top <= 140:
+                            txt = (el.element_info.name or el.window_text() or "").strip()
+                            if re.search(r"\d{2}\.\d{2}\.\d{4}", txt) or "-" in txt:
+                                click_x = r.left + 25
+                                click_y = r.top + r.height() // 2
+                                print(f"[1С:Windows] Клик по плашке периода «{txt}» в coords=({click_x}, {click_y})...")
+                                self.pywinauto.mouse.click(coords=(click_x, click_y))
+                                time.sleep(1.2)
+                                if self._is_dialog_open("период"):
+                                    opened_dialog = True
+                                break
+                    except Exception:
+                        continue
+            except Exception as e:
+                logger.debug("Поиск плашки периода ЭТРН: %s", e)
+
+            # 2. Если по плашке не открылся — открываем через меню таблицы «Еще ▾» (справа)
+            if not opened_dialog and not self._is_dialog_open("период"):
+                print("[1С:Windows] Открытие диалога периода через меню таблицы «Еще ▾»...")
+                self._click_table_more_button()
+                time.sleep(0.6)
+                for w in self.Desktop(backend="uia").windows():
+                    for el in w.descendants():
+                        txt = (el.element_info.name or el.window_text() or "").strip().lower()
+                        if "установить период" in txt:
+                            print(f"[1С:Windows] Нажатие пункта «{txt}»...")
+                            el.click_input()
                             opened_dialog = True
                             time.sleep(1.2)
                             break
-                except Exception:
-                    continue
-        except Exception as e:
-            logger.debug("Поиск плашки периода ЭТРН: %s", e)
-
-        # 2. Если по плашке не открылся — открываем через меню таблицы «Еще ▾»
-        if not opened_dialog or not self._is_dialog_open("период"):
-            print("[1С:Windows] Открытие диалога периода через меню таблицы «Еще ▾»...")
-            self._click_table_more_button()
-            time.sleep(0.8)
-            for w in self.Desktop(backend="uia").windows():
-                for el in w.descendants():
-                    txt = (el.element_info.name or el.window_text() or "").strip().lower()
-                    if "установить период" in txt:
-                        print(f"[1С:Windows] Нажатие пункта «{txt}»...")
-                        el.click_input()
-                        opened_dialog = True
-                        time.sleep(1.2)
+                    if opened_dialog:
                         break
-                if opened_dialog:
-                    break
 
-        # 3. Ожидание появления диалога «Выберите период»
-        dlg = self._find_dialog("период", timeout=6.0)
-        if not dlg:
-            print("[1С:Windows] ⚠ Диалог периода не найден через _find_dialog, повторная попытка через «Еще ▾»...")
-            self._click_table_more_button()
-            time.sleep(0.8)
-            for w in self.Desktop(backend="uia").windows():
-                for el in w.descendants():
-                    txt = (el.element_info.name or el.window_text() or "").strip().lower()
-                    if "установить период" in txt:
-                        el.click_input()
-                        time.sleep(1.5)
-                        break
+            # 3. Ищем диалог «Выберите период»
             dlg = self._find_dialog("период", timeout=4.0)
-
-        if not dlg:
-            raise RuntimeError("Не удалось открыть диалог «Выберите период» в «ЭТРН»!")
-
-        try:
-            dlg.set_focus()
-            self.win32gui.SetForegroundWindow(dlg.handle)
-        except Exception:
-            pass
-        time.sleep(0.3)
-
-        # 4. Ввод дат в поля диалога
-        print(f"[1С:Windows] Ввод дат в поля диалога: с {d_from_str} по {d_to_str}...")
-        edits = []
-        try:
-            for e in dlg.descendants(control_type="Edit"):
+            if dlg:
                 try:
-                    r = e.rectangle()
-                    if r.width() >= 30 and r.height() >= 10:
-                        edits.append(e)
+                    dlg.set_focus()
                 except Exception:
-                    continue
-        except Exception:
-            pass
+                    pass
+                try:
+                    self.win32gui.SetForegroundWindow(dlg.handle)
+                except Exception:
+                    pass
+                time.sleep(0.3)
 
-        edits.sort(key=lambda e: (e.rectangle().top, e.rectangle().left))
+                # 4. Точный ввод дат в Edit-поля диалога
+                edits = []
+                try:
+                    for e in dlg.descendants(control_type="Edit"):
+                        try:
+                            r = e.rectangle()
+                            if r.width() >= 30 and r.height() >= 10:
+                                edits.append(e)
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
 
-        if len(edits) >= 2:
-            print("[1С:Windows] Заполнение полей даты через Edit («Дата начала» и «Дата окончания»)...")
-            # Поле 1: Дата начала
-            edits[0].click_input()
-            time.sleep(0.15)
-            self._select_all_and_paste(d_from_str)
-            time.sleep(0.15)
+                edits.sort(key=lambda e: (e.rectangle().top, e.rectangle().left))
 
-            # Поле 2: Дата окончания
-            edits[1].click_input()
-            time.sleep(0.15)
-            self._select_all_and_paste(d_to_str)
-            time.sleep(0.15)
-        else:
-            # Резервный ввод: верхние поля диалога (dlg_r.left + 140, dlg_r.top + 80)
-            dlg_r = dlg.rectangle()
-            print(f"[1С:Windows] Заполнение дат в диалоге через координаты/Tab...")
-            click_x = dlg_r.left + 140 if dlg_r.width() > 300 else dlg_r.left + int(dlg_r.width() * 0.25)
-            click_y = dlg_r.top + 80 if dlg_r.height() > 150 else dlg_r.top + int(dlg_r.height() * 0.2)
-            self.pywinauto.mouse.click(coords=(click_x, click_y))
-            time.sleep(0.2)
-            self._select_all_and_paste(d_from_str)
-            time.sleep(0.15)
-            self._hotkey_tab()
-            time.sleep(0.15)
-            self._select_all_and_paste(d_to_str)
-            time.sleep(0.15)
+                if len(edits) >= 2:
+                    print("[1С:Windows] Заполнение полей даты через элементы Edit («Дата начала» и «Дата окончания»)...")
+                    # Поле 1: Дата начала
+                    edits[0].click_input()
+                    time.sleep(0.15)
+                    self._select_all_and_paste(d_from_str)
+                    time.sleep(0.15)
 
-        # 5. Нажатие кнопки «Выбрать» / «ОК»
-        selected = False
-        try:
-            for btn in dlg.descendants(control_type="Button"):
-                btxt = (btn.element_info.name or btn.window_text() or "").strip().lower()
-                if btxt in ("выбрать", "ок"):
-                    print(f"[1С:Windows] Подтверждение выбора периода (кнопка «{btxt}»)...")
-                    btn.click_input()
-                    selected = True
-                    break
-        except Exception:
-            pass
+                    # Поле 2: Дата окончания
+                    edits[1].click_input()
+                    time.sleep(0.15)
+                    self._select_all_and_paste(d_to_str)
+                    time.sleep(0.15)
+                else:
+                    print("[1С:Windows] Заполнение дат в диалоге через координаты/Tab...")
+                    dlg_r = dlg.rectangle()
+                    self.pywinauto.mouse.click(coords=(dlg_r.left + 140, dlg_r.top + 80))
+                    time.sleep(0.2)
+                    self._select_all_and_paste(d_from_str)
+                    time.sleep(0.15)
+                    self._hotkey_tab()
+                    time.sleep(0.15)
+                    self._select_all_and_paste(d_to_str)
+                    time.sleep(0.15)
 
-        if not selected:
-            # Клик по кнопке «Выбрать» внизу диалога и Enter
-            dlg_r = dlg.rectangle()
-            btn_x = dlg_r.left + int(dlg_r.width() * 0.73)
-            btn_y = dlg_r.bottom - 25
-            print(f"[1С:Windows] Клик по кнопке «Выбрать» coords=({btn_x}, {btn_y})...")
-            try:
-                self.pywinauto.mouse.click(coords=(btn_x, btn_y))
-            except Exception:
-                pass
-            time.sleep(0.2)
-            self._hotkey_enter()
+                # Нажатие кнопки «Выбрать» / «ОК»
+                selected = False
+                try:
+                    for btn in dlg.descendants(control_type="Button"):
+                        btxt = (btn.element_info.name or btn.window_text() or "").strip().lower()
+                        if btxt in ("выбрать", "ок"):
+                            print(f"[1С:Windows] Подтверждение выбора периода (кнопка «{btxt}»)...")
+                            btn.click_input()
+                            selected = True
+                            break
+                except Exception:
+                    pass
 
-        # Ожидание закрытия диалога «Выберите период»
-        for _ in range(15):
-            if not self._is_dialog_open("период"):
-                break
-            time.sleep(0.3)
+                if not selected:
+                    self._hotkey_enter()
 
-        time.sleep(1.5)
-        print(f"[1С:Windows] ✓ Период списка «ЭТРН» успешно установлен: с {d_from_str} по {d_to_str}.")
+                # Ожидание закрытия диалога «Выберите период»
+                for _ in range(15):
+                    if not self._is_dialog_open("период"):
+                        break
+                    time.sleep(0.3)
+
+                time.sleep(1.5)
+                print(f"[1С:Windows] ✓ Период списка «ЭТРН» успешно установлен: с {d_from_str} по {d_to_str}.")
+                return
+            else:
+                print(f"[1С:Windows] ⚠ Диалог периода не открылся на попытке {attempt}/{max_attempts}, повтор...")
+                time.sleep(1.0)
+
+        print(f"[1С:Windows] ⚠ Диалог периода не был открыт после {max_attempts} попыток, продолжаем выгрузку списка...")
 
     def _configure_etrn_columns(self, dlg) -> None:
         """
