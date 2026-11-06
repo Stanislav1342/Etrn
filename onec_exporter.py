@@ -1201,6 +1201,27 @@ class WindowsOneCExporter(BaseOneCExporter):
     # ---------------------------------------------------------------------
     # Раздел 3: Отчет «Контроль подписания перевозчиков по ЭТРН»
     # ---------------------------------------------------------------------
+    def _is_percent_report_ready(self) -> bool:
+        """
+        Проверяет, появились ли данные в сформированном табличном документе отчета.
+        В строках сформированного отчета появляются перевозчики («ООО», «ИП») или проценты («%»).
+        """
+        try:
+            main_r = self.main_win.rectangle()
+            table_top = main_r.top + 150
+            for el in self.main_win.descendants():
+                try:
+                    r = el.rectangle()
+                    if r.top >= table_top and r.width() > 20 and r.height() > 10:
+                        txt = (el.element_info.name or el.window_text() or "").strip()
+                        if "%" in txt or any(kw in txt for kw in ("ИП ", "ООО ", "ОАО ", "ЗАО ", "ЛТД")):
+                            return True
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return False
+
     def _export_percent_report(
         self,
         date_from: datetime,
@@ -1208,13 +1229,15 @@ class WindowsOneCExporter(BaseOneCExporter):
         target_filepath: str,
     ) -> None:
         """
-        Заполняет даты в шапке отчета «Контроль подписания...», формирует его (F5)
+        Заполняет даты в шапке отчета «Контроль подписания...», формирует его (кнопка «Сформировать»)
         и сохраняет в Excel файл 'Процент.xlsx'.
         """
         d_from_str = date_from.strftime("%d.%m.%Y")
         d_to_str = date_to.strftime("%d.%m.%Y")
         print(f"\n[1С:Windows] Настройка отчета «{self.cfg.title_percent}»...")
         print(f"[1С:Windows] Заполнение дат в шапке отчета: с {d_from_str} по {d_to_str}...")
+
+        time.sleep(1.5)
 
         # Поиск Edit полей в шапке отчета
         edits: List = []
@@ -1252,14 +1275,12 @@ class WindowsOneCExporter(BaseOneCExporter):
             self._select_all_and_paste(d_to_str)
             time.sleep(0.15)
 
-        # Фиксация введенных дат (Enter) и снятие фокуса с поля ввода (Tab)
+        # Фиксация введенных дат (Enter без перехода в соседнее поле Перевозчик)
         self._hotkey_enter()
-        time.sleep(0.2)
-        self._hotkey_tab()
         time.sleep(0.3)
 
         # 3. Нажатие кнопки «Сформировать»
-        print("[1С:Windows] Запуск формирования отчета (кнопка «Сформировать» / F5)...")
+        print("[1С:Windows] Запуск формирования отчета (кнопка «Сформировать»)...")
         formed = False
         main_r = self.main_win.rectangle()
 
@@ -1287,21 +1308,15 @@ class WindowsOneCExporter(BaseOneCExporter):
             logger.debug("Поиск кнопки Сформировать: %s", e)
 
         if not formed:
-            # Кнопка «Сформировать» в 1С всегда находится в левом верхнем углу тулбара отчета
-            form_x = max(main_r.left + 50, 70)
-            form_y = main_r.top + 75
-            print(f"[1С:Windows] Координатный клик кнопки «Сформировать» в coords=({form_x}, {form_y})...")
-            self.pywinauto.mouse.click(coords=(form_x, form_y))
+            # Если кнопку не нашли по имени — нажимаем F5
+            print("[1С:Windows] Запуск формирования через горячую клавишу F5...")
+            self._hotkey_f5()
 
-        # Дополнительно посылаем F5
-        time.sleep(0.3)
-        self._hotkey_f5()
-
-        # Ожидание завершения формирования отчета
-        max_timeout = max(getattr(self.cfg, "report_gen_timeout", 60), 60)
+        # Ожидание завершения формирования отчета (динамическое)
+        max_timeout = max(getattr(self.cfg, "report_gen_timeout", 45), 45)
         print(f"[1С:Windows] Ожидание формирования отчета (до {max_timeout} сек)...")
         start_time = time.time()
-        time.sleep(5.0)
+        time.sleep(4.0)
 
         while True:
             elapsed = int(time.time() - start_time)
@@ -1309,10 +1324,14 @@ class WindowsOneCExporter(BaseOneCExporter):
                 print(f"[1С:Windows] Достигнут таймаут ожидания ({max_timeout} сек), переходим к сохранению...")
                 break
 
-            # Проверяем признаки активной генерации отчета
-            is_generating = False
+            # 1. Проверяем, появились ли данные в таблице
+            if elapsed >= 8 and self._is_percent_report_ready():
+                print(f"[1С:Windows] ✓ Данные отчета обнаружены на экране! Формирование завершено за {elapsed} сек.")
+                time.sleep(1.0)
+                break
 
-            # 1. Занят ли поток окна 1С (Win32)
+            # 2. Проверяем признаки активной генерации отчета
+            is_generating = False
             try:
                 import ctypes
                 if ctypes.windll.user32.IsHungAppWindow(self.main_win.handle):
@@ -1320,7 +1339,6 @@ class WindowsOneCExporter(BaseOneCExporter):
             except Exception:
                 pass
 
-            # 2. Наличие кнопки «Прервать» или статуса «Формирование...»
             if not is_generating:
                 try:
                     for el in self.main_win.descendants():
@@ -1336,17 +1354,13 @@ class WindowsOneCExporter(BaseOneCExporter):
 
             if is_generating:
                 print(f"[1С:Windows] 1С формирует отчет... ({elapsed} сек)")
-                time.sleep(3.0)
-            else:
-                # Минимальная пауза 25 сек для завершения серверной выборки
-                if elapsed < 25:
-                    print(f"[1С:Windows] Ожидание завершения выборки отчета... ({elapsed} сек)")
-                    time.sleep(3.0)
-                    continue
-
-                print(f"[1С:Windows] ✓ Отчет успешно сформирован за {elapsed} сек.")
-                time.sleep(2.0)
+            elif elapsed >= 12:
+                # Если 1С свободна и прошло более 12 секунд
+                print(f"[1С:Windows] ✓ Отчет готов к сохранению ({elapsed} сек).")
+                time.sleep(1.0)
                 break
+
+            time.sleep(1.5)
 
         # Кликаем в область сформированной таблицы перед сохранением, чтобы передать ей фокус
         table_focus_x = main_r.left + 250
