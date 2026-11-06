@@ -475,7 +475,7 @@ class WindowsOneCExporter(BaseOneCExporter):
 
     def _close_unwanted_tabs(self) -> None:
         """
-        Закрывает все временные вкладки на нижней панели 1С по их крестику [x],
+        Закрывает все временные вкладки на панели открытых 1С,
         сохраняя ТОЛЬКО 4 постоянных рабочих раздела пользователя:
         1. «Маршрутный лист»
         2. «Логгеры температуры»
@@ -492,39 +492,60 @@ class WindowsOneCExporter(BaseOneCExporter):
             return
 
         WHITELIST = (
-            "маршрутный лист",
-            "логгеры температуры",
-            "холодовая цепь",
-            "рабочее место",
-            "электронные транспортные",
-            "начальная страница",
-            "главное",
+            "маршрутн",          # «Маршрутный лист»
+            "логгер",            # «Логгеры температуры»
+            "холодов",           # «Рабочее место Холодовая цепь»
+            "рабочее место",     # «Рабочее место»
+            "транспортн",        # «Электронные транспортные накладные»
+            "начальн",           # «Начальная страница»
+            "главн",             # «Главное»
+        )
+
+        BLACKLIST = (
+            "модель расчетов",
+            "этрн 1с",
+            "процент",
+            "контроль подписания",
+            "информация по мл",
+            "список",
+            ".xlsx",
         )
 
         print("[1С:Windows] Проверка и закрытие временных вкладок (сохраняем только 4 рабочих раздела)...")
-        # До 6 проходов: после закрытия одной вкладки остальные сдвигаются влево
-        for pass_idx in range(6):
+        # До 8 проходов: закрываем все лишние вкладки
+        for pass_idx in range(8):
             tab_closed_in_pass = False
             try:
                 main_r = self.main_win.rectangle()
                 for el in self.main_win.descendants():
                     try:
                         r = el.rectangle()
-                        # Элементы нижней панели вкладок (высота ~30-40 пикселей от низа окна 1С)
-                        if r.top >= main_r.bottom - 75 and r.width() >= 40 and r.height() >= 15:
+                        # Элементы нижней панели открытых вкладок 1С (нижние 130 пикселей окна)
+                        if (main_r.bottom - 130 <= r.top <= main_r.bottom - 5) and (14 <= r.height() <= 55) and (25 <= r.width() <= 450):
                             txt = (el.element_info.name or el.window_text() or "").strip()
                             if not txt:
                                 continue
                             txt_lower = txt.lower()
-                            # Если вкладка не входит в белый список разрешенных
-                            if not any(w in txt_lower for w in WHITELIST):
-                                close_x = r.right - 12
+
+                            is_blacklisted = any(b in txt_lower for b in BLACKLIST)
+                            is_whitelisted = any(w in txt_lower for w in WHITELIST)
+
+                            if is_blacklisted or not is_whitelisted:
+                                print(f"[1С:Windows] Закрытие временной вкладки «{txt}»...")
+                                # 1. Прямой клик по крестику [x] на вкладке
+                                close_x = r.right - 10
                                 close_y = r.top + r.height() // 2
-                                print(f"[1С:Windows] Закрытие временной вкладки «{txt}» по крестику [x]...")
                                 self.pywinauto.mouse.click(coords=(close_x, close_y))
+                                time.sleep(0.3)
+
+                                # 2. На случай, если фокус перешел на вкладку — закрываем через Ctrl+F4
+                                self._hotkey_ctrl_f4()
+                                time.sleep(0.2)
+                                self._send_hotkey(self.win32con.VK_CONTROL, 0x57)  # Ctrl + W
+                                time.sleep(0.4)
+
                                 tab_closed_in_pass = True
-                                time.sleep(0.8)
-                                break  # Прерываем и пересканируем, так как координаты сдвинулись
+                                break  # Пересканируем после закрытия
                     except Exception:
                         continue
             except Exception as e:
@@ -906,8 +927,13 @@ class WindowsOneCExporter(BaseOneCExporter):
         # 5. Сохранение файла на рабочий стол
         self._save_in_dialog(target_filepath)
 
-        # 6. Безопасное закрытие временных вкладок (сохраняем только 4 постоянных раздела)
+        # 6. Закрытие сформированной вкладки списка (Ctrl+F4)
+        print("[1С:Windows] Закрытие сформированной вкладки списка (Ctrl+F4)...")
         time.sleep(0.5)
+        self._hotkey_ctrl_f4()
+        time.sleep(0.5)
+
+        # 7. Безопасное закрытие временных вкладок (сохраняем только 4 постоянных раздела)
         self._close_unwanted_tabs()
 
     # ---------------------------------------------------------------------
@@ -1189,8 +1215,13 @@ class WindowsOneCExporter(BaseOneCExporter):
         # 5. Сохранение файла на рабочий стол
         self._save_in_dialog(target_filepath)
 
-        # 6. Безопасное закрытие временных вкладок (сохраняем только 4 постоянных раздела)
+        # 6. Закрытие сформированной вкладки списка (Ctrl+F4)
+        print("[1С:Windows] Закрытие сформированной вкладки списка (Ctrl+F4)...")
         time.sleep(0.5)
+        self._hotkey_ctrl_f4()
+        time.sleep(0.5)
+
+        # 7. Безопасное закрытие временных вкладок (сохраняем только 4 постоянных раздела)
         self._close_unwanted_tabs()
 
     # ---------------------------------------------------------------------
@@ -1269,8 +1300,13 @@ class WindowsOneCExporter(BaseOneCExporter):
         # 4. Сохранение отчета
         self._save_in_dialog(target_filepath)
 
-        # 5. Закрытие вкладки отчета и временных файлов Excel (сохраняем только 4 раздела пользователя)
+        # 5. Закрытие вкладки отчета (Ctrl+F4)
+        print("[1С:Windows] Закрытие временной вкладки отчета (Ctrl+F4)...")
         time.sleep(0.5)
+        self._hotkey_ctrl_f4()
+        time.sleep(0.5)
+
+        # 6. Закрытие оставшихся временных вкладок (сохраняем только 4 раздела пользователя)
         self._close_unwanted_tabs()
 
     # ---------------------------------------------------------------------
