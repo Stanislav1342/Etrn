@@ -261,6 +261,31 @@ class WindowsOneCExporter(BaseOneCExporter):
         self._paste_clipboard()
         time.sleep(0.1)
 
+    def _enter_date_field(self, click_x: int, click_y: int, date_str: str) -> None:
+        """
+        Гарантированно очищает и вставляет дату в поле 1С:
+        1. Двойной клик в центр поля (выделяет существующее значение).
+        2. Выделение всеми способами: Ctrl+A и Home + Shift+End.
+        3. Вставка даты через буфер обмена (Ctrl+V).
+        """
+        self.pywinauto.mouse.click(coords=(click_x, click_y))
+        time.sleep(0.1)
+        self.pywinauto.mouse.double_click(coords=(click_x, click_y))
+        time.sleep(0.1)
+
+        set_clipboard(date_str)
+        time.sleep(0.06)
+
+        self._send_hotkey(self.win32con.VK_CONTROL, 0x41)  # Ctrl + A
+        time.sleep(0.05)
+        self._send_hotkey(self.win32con.VK_HOME)
+        time.sleep(0.05)
+        self._send_hotkey(self.win32con.VK_SHIFT, self.win32con.VK_END)
+        time.sleep(0.05)
+
+        self._paste_clipboard()
+        time.sleep(0.12)
+
     # ---------------------------------------------------------------------
     # Надежный поиск диалогов в Windows (Win32 EnumWindows + Desktop UIA)
     # ---------------------------------------------------------------------
@@ -977,30 +1002,33 @@ class WindowsOneCExporter(BaseOneCExporter):
 
                 edits.sort(key=lambda e: (e.rectangle().top, e.rectangle().left))
 
-                if len(edits) >= 2:
-                    print("[1С:Windows] Заполнение полей даты через элементы Edit («Дата начала» и «Дата окончания»)...")
-                    # Поле 1: Дата начала
-                    edits[0].click_input()
-                    time.sleep(0.15)
-                    self._select_all_and_paste(d_from_str)
-                    time.sleep(0.15)
+                dlg_r = dlg.rectangle()
 
-                    # Поле 2: Дата окончания
-                    edits[1].click_input()
-                    time.sleep(0.15)
-                    self._select_all_and_paste(d_to_str)
-                    time.sleep(0.15)
+                # Координаты Box 1 и Box 2 по проверенным пропорциям скриншота 1С
+                box1_x = dlg_r.left + int(dlg_r.width() * 0.17)
+                box1_y = dlg_r.top + int(dlg_r.height() * 0.14)
+                box2_x = dlg_r.left + int(dlg_r.width() * 0.50)
+                box2_y = box1_y
+
+                # Если UIA видит Edit-элементы в верхней строке, уточняем координаты
+                if len(edits) >= 2 and edits[0].rectangle().top < dlg_r.top + int(dlg_r.height() * 0.3):
+                    r0 = edits[0].rectangle()
+                    r1 = edits[1].rectangle()
+                    box1_x = r0.left + r0.width() // 2
+                    box1_y = r0.top + r0.height() // 2
+                    box2_x = r1.left + r1.width() // 2
+                    box2_y = r1.top + r1.height() // 2
+                    print(f"[1С:Windows] Координаты Edit-полей: Поле 1=({box1_x}, {box1_y}), Поле 2=({box2_x}, {box2_y})...")
                 else:
-                    print("[1С:Windows] Заполнение дат в диалоге через координаты/Tab...")
-                    dlg_r = dlg.rectangle()
-                    self.pywinauto.mouse.click(coords=(dlg_r.left + 140, dlg_r.top + 80))
-                    time.sleep(0.2)
-                    self._select_all_and_paste(d_from_str)
-                    time.sleep(0.15)
-                    self._hotkey_tab()
-                    time.sleep(0.15)
-                    self._select_all_and_paste(d_to_str)
-                    time.sleep(0.15)
+                    print(f"[1С:Windows] Расчетные координаты полей: Поле 1=({box1_x}, {box1_y}), Поле 2=({box2_x}, {box2_y})...")
+
+                # Ввод даты начала
+                print(f"[1С:Windows] Заполнение даты начала ({d_from_str}) в ({box1_x}, {box1_y})...")
+                self._enter_date_field(box1_x, box1_y, d_from_str)
+
+                # Ввод даты окончания
+                print(f"[1С:Windows] Заполнение даты окончания ({d_to_str}) в ({box2_x}, {box2_y})...")
+                self._enter_date_field(box2_x, box2_y, d_to_str)
 
                 # Нажатие кнопки «Выбрать» / «ОК»
                 selected = False
@@ -1016,6 +1044,14 @@ class WindowsOneCExporter(BaseOneCExporter):
                     pass
 
                 if not selected:
+                    btn_x = dlg_r.left + int(dlg_r.width() * 0.73)
+                    btn_y = dlg_r.top + int(dlg_r.height() * 0.94)
+                    print(f"[1С:Windows] Координатный клик кнопки «Выбрать» в ({btn_x}, {btn_y})...")
+                    try:
+                        self.pywinauto.mouse.click(coords=(btn_x, btn_y))
+                    except Exception:
+                        pass
+                    time.sleep(0.2)
                     self._hotkey_enter()
 
                 # Ожидание закрытия диалога «Выберите период»
