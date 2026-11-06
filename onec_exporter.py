@@ -475,85 +475,14 @@ class WindowsOneCExporter(BaseOneCExporter):
 
     def _close_unwanted_tabs(self) -> None:
         """
-        Закрывает все временные вкладки на панели открытых 1С,
-        сохраняя ТОЛЬКО 4 постоянных рабочих раздела пользователя:
-        1. «Маршрутный лист»
-        2. «Логгеры температуры»
-        3. «Рабочее место Холодовая цепь» / «Холодовая цепь»
-        4. «Электронные транспортные накладные»
-        (а также «Начальная страница» / «Главное», если есть).
-
-        Закрываются:
-        - Сохраненные таблицы Excel (напр. «Модель расчетов.xlsx», «ЭТРН 1с.xlsx»)
-        - Вкладка отчета «Контроль подписания перевозчиков по ЭТРН»
-        - Любые промежуточные вкладки «Информация по МЛ», «Список» и т.п.
+        Безопасная функция:
+        Все сформированные временные таблицы («Модель расчетов.xlsx», «ЭТРН 1с.xlsx»)
+        и вкладка отчета «Контроль подписания...» закрываются СТРОГО адресно через Ctrl+F4
+        сразу после сохранения каждого файла на диск.
+        Эта функция не сканирует и не закрывает вкладки наугад, что на 100% гарантирует
+        сохранность 4 постоянных рабочих разделов пользователя.
         """
-        if not self.main_win:
-            return
-
-        WHITELIST = (
-            "маршрутн",          # «Маршрутный лист»
-            "логгер",            # «Логгеры температуры»
-            "холодов",           # «Рабочее место Холодовая цепь»
-            "рабочее место",     # «Рабочее место»
-            "транспортн",        # «Электронные транспортные накладные»
-            "начальн",           # «Начальная страница»
-            "главн",             # «Главное»
-        )
-
-        BLACKLIST = (
-            "модель расчетов",
-            "этрн 1с",
-            "процент",
-            "контроль подписания",
-            "информация по мл",
-            "список",
-            ".xlsx",
-        )
-
-        print("[1С:Windows] Проверка и закрытие временных вкладок (сохраняем только 4 рабочих раздела)...")
-        # До 8 проходов: закрываем все лишние вкладки
-        for pass_idx in range(8):
-            tab_closed_in_pass = False
-            try:
-                main_r = self.main_win.rectangle()
-                for el in self.main_win.descendants():
-                    try:
-                        r = el.rectangle()
-                        # Элементы нижней панели открытых вкладок 1С (нижние 130 пикселей окна)
-                        if (main_r.bottom - 130 <= r.top <= main_r.bottom - 5) and (14 <= r.height() <= 55) and (25 <= r.width() <= 450):
-                            txt = (el.element_info.name or el.window_text() or "").strip()
-                            if not txt:
-                                continue
-                            txt_lower = txt.lower()
-
-                            is_blacklisted = any(b in txt_lower for b in BLACKLIST)
-                            is_whitelisted = any(w in txt_lower for w in WHITELIST)
-
-                            if is_blacklisted or not is_whitelisted:
-                                print(f"[1С:Windows] Закрытие временной вкладки «{txt}»...")
-                                # 1. Прямой клик по крестику [x] на вкладке
-                                close_x = r.right - 10
-                                close_y = r.top + r.height() // 2
-                                self.pywinauto.mouse.click(coords=(close_x, close_y))
-                                time.sleep(0.3)
-
-                                # 2. На случай, если фокус перешел на вкладку — закрываем через Ctrl+F4
-                                self._hotkey_ctrl_f4()
-                                time.sleep(0.2)
-                                self._send_hotkey(self.win32con.VK_CONTROL, 0x57)  # Ctrl + W
-                                time.sleep(0.4)
-
-                                tab_closed_in_pass = True
-                                break  # Пересканируем после закрытия
-                    except Exception:
-                        continue
-            except Exception as e:
-                logger.debug("Ошибка в цикле закрытия вкладок: %s", e)
-                break
-
-            if not tab_closed_in_pass:
-                break
+        pass
 
     def _close_temporary_tab(self, tab_title_keyword: str = "") -> None:
         """Алиас: очищает временные вкладки через _close_unwanted_tabs."""
@@ -948,7 +877,7 @@ class WindowsOneCExporter(BaseOneCExporter):
             for el in self.main_win.descendants():
                 try:
                     r = el.rectangle()
-                    if r.left <= 400 and 60 <= r.top <= 150:
+                    if r.left <= 450 and 50 <= r.top <= 160:
                         txt = (el.element_info.name or el.window_text() or "").strip()
                         if re.search(r"\d{2}\.\d{2}\.\d{4}", txt) or "-" in txt:
                             # Проверяем дефект: начинается с '-' (нет начальной даты, что вешает 1С)
@@ -961,7 +890,7 @@ class WindowsOneCExporter(BaseOneCExporter):
                     continue
         except Exception:
             pass
-        return True, ""
+        return False, "Плашка периода не найдена"
 
     def _set_etrn_period(self, date_from: datetime, date_to: datetime) -> None:
         """
@@ -970,24 +899,29 @@ class WindowsOneCExporter(BaseOneCExporter):
         - Клик по плашке периода со смещением влево (защита от крестика [x] очистки)
         - Прямой ввод в Edit-элементы «Дата начала» и «Дата окончания»
         - Верификация и самовосстановление: недопущение периода вида '- 03.11.2026'
+        - Жесткий запрет выгрузки без подтвержденного периода (защита от зависания базы)
         """
         d_from_str = date_from.strftime("%d.%m.%Y")
         d_to_str = date_to.strftime("%d.%m.%Y")
         print(f"[1С:Windows] Установка периода в «ЭТРН»: с {d_from_str} по {d_to_str}...")
 
+        # Даем списку ЭТРН время отрисоваться
+        time.sleep(1.2)
+
         max_attempts = 3
+        period_set = False
+
         for attempt in range(1, max_attempts + 1):
             opened_dialog = False
 
-            # 1. Клик по плашке периода под «Создать»
+            # 1. Попытка клика по уже существующей плашке периода
             try:
                 for el in self.main_win.descendants():
                     try:
                         r = el.rectangle()
-                        if r.left <= 400 and 60 <= r.top <= 150:
+                        if r.left <= 450 and 50 <= r.top <= 160:
                             txt = (el.element_info.name or el.window_text() or "").strip()
                             if re.search(r"\d{2}\.\d{2}\.\d{4}", txt) or "-" in txt:
-                                # Клик со смещением влево (r.left + 25), чтобы не попасть в крестик [x] очистки
                                 click_x = r.left + 25
                                 click_y = r.top + r.height() // 2
                                 print(f"[1С:Windows] Клик по плашке периода «{txt}» в coords=({click_x}, {click_y})...")
@@ -1004,11 +938,12 @@ class WindowsOneCExporter(BaseOneCExporter):
             if not opened_dialog or not self._is_dialog_open("период"):
                 print("[1С:Windows] Открытие диалога периода через меню таблицы «Еще ▾»...")
                 self._click_table_more_button()
-                time.sleep(0.6)
+                time.sleep(0.8)
                 for w in self.Desktop(backend="uia").windows():
                     for el in w.descendants():
                         txt = (el.element_info.name or el.window_text() or "").strip().lower()
                         if "установить период" in txt:
+                            print(f"[1С:Windows] Нажатие пункта «{txt}»...")
                             el.click_input()
                             opened_dialog = True
                             time.sleep(1.2)
@@ -1017,83 +952,95 @@ class WindowsOneCExporter(BaseOneCExporter):
                         break
 
             # 3. Ищем диалог «Выберите период»
-            dlg = self._find_dialog("период", timeout=4.0)
-            if dlg:
-                try:
-                    dlg.set_focus()
-                except Exception:
-                    pass
-                try:
-                    self.win32gui.SetForegroundWindow(dlg.handle)
-                except Exception:
-                    pass
-                time.sleep(0.3)
+            dlg = self._find_dialog("период", timeout=5.0)
+            if not dlg:
+                print(f"[1С:Windows] ⚠ Диалог «Выберите период» не открылся (попытка {attempt}/{max_attempts})...")
+                time.sleep(1.0)
+                continue
 
-                # 4. Точный ввод дат в Edit-поля диалога
-                edits = []
-                try:
-                    for e in dlg.descendants(control_type="Edit"):
-                        try:
-                            r = e.rectangle()
-                            if r.width() >= 30 and r.height() >= 10:
-                                edits.append(e)
-                        except Exception:
-                            continue
-                except Exception:
-                    pass
+            try:
+                dlg.set_focus()
+                self.win32gui.SetForegroundWindow(dlg.handle)
+            except Exception:
+                pass
+            time.sleep(0.3)
 
-                edits.sort(key=lambda e: (e.rectangle().top, e.rectangle().left))
+            # 4. Точный ввод дат в Edit-поля диалога
+            edits = []
+            try:
+                for e in dlg.descendants(control_type="Edit"):
+                    try:
+                        r = e.rectangle()
+                        if r.width() >= 30 and r.height() >= 10:
+                            edits.append(e)
+                    except Exception:
+                        continue
+            except Exception:
+                pass
 
-                if len(edits) >= 2:
-                    print("[1С:Windows] Заполнение полей даты через элементы Edit («Дата начала» и «Дата окончания»)...")
-                    # Поле 1: Дата начала
-                    edits[0].click_input()
-                    time.sleep(0.15)
-                    self._select_all_and_paste(d_from_str)
-                    time.sleep(0.15)
+            edits.sort(key=lambda e: (e.rectangle().top, e.rectangle().left))
 
-                    # Поле 2: Дата окончания
-                    edits[1].click_input()
-                    time.sleep(0.15)
-                    self._select_all_and_paste(d_to_str)
-                    time.sleep(0.15)
-                else:
-                    print("[1С:Windows] Заполнение дат в диалоге через координаты/Tab...")
-                    dlg_r = dlg.rectangle()
-                    self.pywinauto.mouse.click(coords=(dlg_r.left + 140, dlg_r.top + 80))
-                    time.sleep(0.2)
-                    self._select_all_and_paste(d_from_str)
-                    time.sleep(0.15)
-                    self._hotkey_tab()
-                    time.sleep(0.15)
-                    self._select_all_and_paste(d_to_str)
-                    time.sleep(0.15)
+            if len(edits) >= 2:
+                print("[1С:Windows] Заполнение полей даты через Edit («Дата начала» и «Дата окончания»)...")
+                # Поле 1: Дата начала
+                edits[0].click_input()
+                time.sleep(0.15)
+                self._select_all_and_paste(d_from_str)
+                time.sleep(0.15)
 
-                # Нажатие кнопки «Выбрать» / «ОК»
-                selected = False
-                try:
-                    for btn in dlg.descendants(control_type="Button"):
-                        btxt = (btn.element_info.name or btn.window_text() or "").strip().lower()
-                        if btxt in ("выбрать", "ок"):
-                            btn.click_input()
-                            selected = True
-                            break
-                except Exception:
-                    pass
+                # Поле 2: Дата окончания
+                edits[1].click_input()
+                time.sleep(0.15)
+                self._select_all_and_paste(d_to_str)
+                time.sleep(0.15)
+            else:
+                print("[1С:Windows] Заполнение дат в диалоге через координаты/Tab...")
+                dlg_r = dlg.rectangle()
+                self.pywinauto.mouse.click(coords=(dlg_r.left + 140, dlg_r.top + 80))
+                time.sleep(0.2)
+                self._select_all_and_paste(d_from_str)
+                time.sleep(0.15)
+                self._hotkey_tab()
+                time.sleep(0.15)
+                self._select_all_and_paste(d_to_str)
+                time.sleep(0.15)
 
-                if not selected:
-                    self._hotkey_enter()
+            # Нажатие кнопки «Выбрать» / «ОК»
+            selected = False
+            try:
+                for btn in dlg.descendants(control_type="Button"):
+                    btxt = (btn.element_info.name or btn.window_text() or "").strip().lower()
+                    if btxt in ("выбрать", "ок"):
+                        btn.click_input()
+                        selected = True
+                        break
+            except Exception:
+                pass
 
-                time.sleep(2.5)
+            if not selected:
+                self._hotkey_enter()
 
-            # 5. Самовосстановление: проверяем текст на плашке периода в основном окне
+            time.sleep(2.5)
+
+            # 5. Верификация плашки периода
             is_valid, pill_txt = self._verify_etrn_period_pill(d_from_str, d_to_str)
             if is_valid:
-                print(f"[1С:Windows] ✓ Период списка «ЭТРН» успешно подтвержден: «{pill_txt or (d_from_str + ' - ' + d_to_str)}».")
+                print(f"[1С:Windows] ✓ Период списка «ЭТРН» успешно подтвержден: «{pill_txt}».")
+                period_set = True
                 break
             else:
                 print(f"[1С:Windows] ⚠ ВНИМАНИЕ: плашка периода неверна («{pill_txt}»). Повторная попытка {attempt}/{max_attempts}...")
                 time.sleep(1.0)
+
+        # ЖЕСТКАЯ БЕЗОПАСНОСТЬ: Если период не установлен — ни в коем случае не выгружаем!
+        if not period_set:
+            is_valid, pill_txt = self._verify_etrn_period_pill(d_from_str, d_to_str)
+            if not is_valid:
+                raise RuntimeError(
+                    f"КРИТИЧЕСКАЯ ОШИБКА: Не удалось установить период с {d_from_str} по {d_to_str} в «ЭТРН»! "
+                    f"Текущее значение: «{pill_txt}». "
+                    "Выгрузка остановлена во избежание зависания 1С при выборке всех данных."
+                )
 
     def _configure_etrn_columns(self, dlg) -> None:
         """
@@ -1316,20 +1263,28 @@ class WindowsOneCExporter(BaseOneCExporter):
         """Кликает по кнопке «Еще ▾» на панели списка документов (в правой части тулбара)."""
         clicked = False
         try:
+            more_btns = []
             for btn in self.main_win.descendants(control_type="Button"):
                 txt = (btn.element_info.name or btn.window_text() or "").strip().lower()
                 if txt in ("еще", "ещё"):
                     r = btn.rectangle()
-                    if r.left > 1400 and 50 <= r.top <= 120:
-                        btn.click_input()
-                        clicked = True
-                        break
-        except Exception:
-            pass
+                    if 40 <= r.top <= 140:
+                        more_btns.append(btn)
+            if more_btns:
+                target_btn = max(more_btns, key=lambda b: b.rectangle().left)
+                print(f"[1С:Windows] Клик по кнопке «Еще ▾» ({target_btn.rectangle()})...")
+                target_btn.click_input()
+                clicked = True
+        except Exception as e:
+            logger.debug("Поиск кнопки Еще: %s", e)
 
         if not clicked:
-            # Координатный клик кнопки Еще ~ (1860, 80)
-            self.pywinauto.mouse.click(coords=(1860, 80))
+            main_r = self.main_win.rectangle()
+            # Координатный клик кнопки Еще в правой верхней части тулбара
+            click_x = max(main_r.left + 500, main_r.right - 60)
+            click_y = main_r.top + 70
+            print(f"[1С:Windows] Координатный клик кнопки «Еще ▾» в ({click_x}, {click_y})...")
+            self.pywinauto.mouse.click(coords=(click_x, click_y))
 
     def _save_in_dialog(self, target_filepath: str) -> None:
         """
