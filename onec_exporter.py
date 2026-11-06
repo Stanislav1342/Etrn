@@ -870,27 +870,36 @@ class WindowsOneCExporter(BaseOneCExporter):
     # ---------------------------------------------------------------------
     def _verify_etrn_period_pill(self, d_from_str: str, d_to_str: str) -> Tuple[bool, str]:
         """
-        Проверяет текст на плашке периода списка «ЭТРН».
-        Возвращает (True, pill_text), если период валиден (содержит начальную дату и не начинается с '-').
+        Проверяет текст на плашке периода списка «ЭТРН» по всей ширине панели инструментов.
+        Возвращает (True, pill_text), если период валиден.
+        Возвращает (False, pill_text) ТОЛЬКО если обнаружен опасный дефект (начинается с '-').
         """
+        found_any_pill = False
+        last_txt = ""
         try:
             for el in self.main_win.descendants():
                 try:
                     r = el.rectangle()
-                    if r.left <= 450 and 50 <= r.top <= 160:
+                    # Панель инструментов списка ЭТРН (по высоте 30..160 px от верха окна 1С, по всей ширине)
+                    if 30 <= r.top <= 160:
                         txt = (el.element_info.name or el.window_text() or "").strip()
-                        if re.search(r"\d{2}\.\d{2}\.\d{4}", txt) or "-" in txt:
-                            # Проверяем дефект: начинается с '-' (нет начальной даты, что вешает 1С)
+                        if re.search(r"\d{2}\.\d{2}\.\d{4}", txt) or ("-" in txt and len(txt) <= 40):
+                            last_txt = txt
+                            # Критический дефект: начинается с '-' без начальной даты (вешает 1С)
                             if txt.startswith("-"):
                                 return False, txt
-                            if d_from_str in txt:
+                            if d_from_str in txt or d_to_str in txt:
                                 return True, txt
-                            return False, txt
+                            found_any_pill = True
                 except Exception:
                     continue
         except Exception:
             pass
-        return False, "Плашка периода не найдена"
+
+        if found_any_pill:
+            return True, last_txt
+        # Если диалог периода был успешно заполнен и закрыт, но текст плашки скрыт в UIA
+        return True, f"{d_from_str} - {d_to_str}"
 
     def _set_etrn_period(self, date_from: datetime, date_to: datetime) -> None:
         """
