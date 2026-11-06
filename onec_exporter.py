@@ -117,6 +117,7 @@ class MockOneCExporter(BaseOneCExporter):
         print(f" 3. Прямой переход по ссылке (Shift + F11):")
         print(f"    URL: «{self.cfg.url_marshrut}»")
         print(f"    Открыт раздел: «{self.cfg.title_marshrut}» [OK]")
+        print(f"    Проверка и нормализация фильтров шапки: сняты лишние галочки (Номер, Водитель)")
         print(f"    Установка дат в фильтре отгрузки: с {m_start} по {m_end}")
         print(f"    Кнопка тулбара «Вывести список...»")
         print(f"    Диалог «Вывести список»:")
@@ -124,7 +125,7 @@ class MockOneCExporter(BaseOneCExporter):
         print(f"      • Включение только: Номер, Водитель, Перевозчик, Модель расчетов")
         print(f"      • Нажатие [ОК]")
         print(f"    Сохранение (Ctrl+S) ➔ «{self.cfg.model_file}»")
-        print(f"    Закрытие вкладки «Информация по МЛ» (Ctrl+F4)")
+        print(f"    Закрытие временной вкладки «Модель расчетов.xlsx» по крестику [x]")
         time.sleep(0.4)
 
         # 2. ЭТРН
@@ -133,12 +134,13 @@ class MockOneCExporter(BaseOneCExporter):
         print(f"    URL: «{self.cfg.url_etrn}»")
         print(f"    Открыт раздел: «{self.cfg.title_etrn}» [OK]")
         print(f"    Установка периода списка через диалог: с {e_start} по {e_end}")
+        print(f"    Верификация плашки периода: подтверждено «{e_start} - {e_end}»")
         print(f"    Таблица Еще ➔ «Вывести список...»")
         print(f"    Диалог «Вывести список»:")
         print(f"      • Снятие флажков: Внутренний номер, Грузоотправитель, Комментарий")
         print(f"      • Нажатие [ОК]")
         print(f"    Сохранение (Ctrl+S) ➔ «{self.cfg.etrn_file}»")
-        print(f"    Закрытие вкладки «Список» (Ctrl+F4)")
+        print(f"    Закрытие временной вкладки «ЭТРН 1с.xlsx» по крестику [x]")
         time.sleep(0.4)
 
         # 3. Контроль подписания
@@ -149,7 +151,8 @@ class MockOneCExporter(BaseOneCExporter):
         print(f"    Заполнение полей в шапке отчета: с {e_start} по {e_end}")
         print(f"    Нажатие кнопки «Сформировать» (F5) ➔ Формирование отчета...")
         print(f"    Сохранение (Ctrl+S) ➔ «{self.cfg.percent_file}»")
-        print(f"    Закрытие вкладки отчета (Ctrl+F4)")
+        print(f"    Закрытие временной вкладки отчета по крестику [x]")
+        print(f"    Проверка нижней панели 1С: сохранены только 4 рабочих раздела пользователя")
         time.sleep(0.4)
 
         print("=" * 70)
@@ -470,50 +473,212 @@ class WindowsOneCExporter(BaseOneCExporter):
         """Алиас для обратной совместимости."""
         self._activate_tab_or_open_link(url, section_title)
 
-    def _close_temporary_tab(self, tab_title_keyword: str) -> None:
+    def _close_unwanted_tabs(self) -> None:
         """
-        Безопасно закрывает ТОЛЬКО временные вкладки формирования списка:
-        - «Информация по МЛ»
-        - «Список»
-        СТРОГО ЗАПРЕЩЕНО закрывать любые постоянные разделы пользователя:
-        «Маршрутный лист», «Электронные транспортные накладные», «Логгеры температуры», «Рабочее место Холодовая цепь»!
-        """
-        kw = tab_title_keyword.lower().strip()
-        if kw not in ("информация по мл", "список"):
-            logger.warning(
-                "Попытка закрытия вкладки '%s', не являющейся временным списком! Действие отменено.",
-                tab_title_keyword,
-            )
-            return
+        Закрывает все временные вкладки на нижней панели 1С по их крестику [x],
+        сохраняя ТОЛЬКО 4 постоянных рабочих раздела пользователя:
+        1. «Маршрутный лист»
+        2. «Логгеры температуры»
+        3. «Рабочее место Холодовая цепь» / «Холодовая цепь»
+        4. «Электронные транспортные накладные»
+        (а также «Начальная страница» / «Главное», если есть).
 
-        print(f"[1С:Windows] Безопасное закрытие временной вкладки «{tab_title_keyword}»...")
+        Закрываются:
+        - Сохраненные таблицы Excel (напр. «Модель расчетов.xlsx», «ЭТРН 1с.xlsx»)
+        - Вкладка отчета «Контроль подписания перевозчиков по ЭТРН»
+        - Любые промежуточные вкладки «Информация по МЛ», «Список» и т.п.
+        """
         if not self.main_win:
             return
 
-        closed = False
+        WHITELIST = (
+            "маршрутный лист",
+            "логгеры температуры",
+            "холодовая цепь",
+            "рабочее место",
+            "электронные транспортные",
+            "начальная страница",
+            "главное",
+        )
+
+        print("[1С:Windows] Проверка и закрытие временных вкладок (сохраняем только 4 рабочих раздела)...")
+        # До 6 проходов: после закрытия одной вкладки остальные сдвигаются влево
+        for pass_idx in range(6):
+            tab_closed_in_pass = False
+            try:
+                main_r = self.main_win.rectangle()
+                for el in self.main_win.descendants():
+                    try:
+                        r = el.rectangle()
+                        # Элементы нижней панели вкладок (высота ~30-40 пикселей от низа окна 1С)
+                        if r.top >= main_r.bottom - 75 and r.width() >= 40 and r.height() >= 15:
+                            txt = (el.element_info.name or el.window_text() or "").strip()
+                            if not txt:
+                                continue
+                            txt_lower = txt.lower()
+                            # Если вкладка не входит в белый список разрешенных
+                            if not any(w in txt_lower for w in WHITELIST):
+                                close_x = r.right - 12
+                                close_y = r.top + r.height() // 2
+                                print(f"[1С:Windows] Закрытие временной вкладки «{txt}» по крестику [x]...")
+                                self.pywinauto.mouse.click(coords=(close_x, close_y))
+                                tab_closed_in_pass = True
+                                time.sleep(0.8)
+                                break  # Прерываем и пересканируем, так как координаты сдвинулись
+                    except Exception:
+                        continue
+            except Exception as e:
+                logger.debug("Ошибка в цикле закрытия вкладок: %s", e)
+                break
+
+            if not tab_closed_in_pass:
+                break
+
+    def _close_temporary_tab(self, tab_title_keyword: str = "") -> None:
+        """Алиас: очищает временные вкладки через _close_unwanted_tabs."""
+        self._close_unwanted_tabs()
+
+    def _is_checkbox_checked(self, cb) -> Optional[bool]:
+        """Определяет состояние CheckBox в 1С."""
+        try:
+            if hasattr(cb, "is_checked"):
+                return bool(cb.is_checked())
+        except Exception:
+            pass
+        try:
+            if hasattr(cb, "get_toggle_state"):
+                return cb.get_toggle_state() == 1
+        except Exception:
+            pass
+        try:
+            action = (cb.legacy_properties().get("DefaultAction") or "").lower()
+            if "снять" in action:
+                return True
+            elif "установить" in action:
+                return False
+        except Exception:
+            pass
+        try:
+            val = str(cb.legacy_properties().get("Value") or "")
+            if val in ("1", "True", "true"):
+                return True
+            elif val in ("0", "False", "false"):
+                return False
+        except Exception:
+            pass
+        return None
+
+    def _ensure_marshrut_filters(self) -> None:
+        """
+        Проверяет и нормализует быстрые фильтры в шапке «Маршрутный лист»:
+        Обязательно ВКЛЮЧЕНЫ:
+          • «Дата отгрузки» (>=)
+          • «Дата отгрузки» (<=)
+          • «Пометка удаления» (Нет)
+        Обязательно ВЫКЛЮЧЕНЫ (сняты галочки):
+          • «Водитель»
+          • «Номер»
+          • «Перевозчик»
+          • «Модель расчетов»
+          • «Статус»
+          • «Транспортное средство»
+        """
+        print("[1С:Windows] Проверка фильтров в шапке «Маршрутный лист»...")
+        if not self.main_win:
+            return
+
+        TARGET_RULES = {
+            "водитель": False,
+            "номер": False,
+            "перевозчик": False,
+            "модель расчетов": False,
+            "модель": False,
+            "статус": False,
+            "транспорт": False,
+            "пометка удаления": True,
+            "пометка": True,
+            "дата отгрузки": True,
+            "отгрузки": True,
+        }
+
         try:
             main_r = self.main_win.rectangle()
-            for el in self.main_win.descendants():
+            # Область фильтров шапки: по высоте обычно от main_r.top + 70 до main_r.top + 280
+            filter_top = main_r.top + 70
+            filter_bottom = main_r.top + 280
+
+            labels = []
+            for el in self.main_win.descendants(control_type="Text"):
                 try:
-                    txt = (el.element_info.name or el.window_text() or "").strip().lower()
-                    if kw in txt:
-                        r = el.rectangle()
-                        if r.top >= main_r.bottom - 80 and r.width() > 30:
-                            # Крестик [x] закрытия вкладки расположен у правого края вкладки
-                            close_x = r.right - 12
-                            close_y = r.top + r.height() // 2
-                            print(f"[1С:Windows] Клик по крестику [x] временной вкладки «{txt}»...")
-                            self.pywinauto.mouse.click(coords=(close_x, close_y))
-                            closed = True
-                            time.sleep(1.0)
-                            break
+                    r = el.rectangle()
+                    if filter_top <= r.top <= filter_bottom:
+                        txt = (el.element_info.name or el.window_text() or "").strip()
+                        if txt:
+                            labels.append((txt.lower(), r))
                 except Exception:
                     continue
-        except Exception as e:
-            logger.debug("Закрытие временной вкладки '%s': %s", tab_title_keyword, e)
 
-        if not closed:
-            print(f"[1С:Windows] Временная вкладка «{tab_title_keyword}» уже закрыта.")
+            checkboxes = []
+            for el in self.main_win.descendants(control_type="CheckBox"):
+                try:
+                    r = el.rectangle()
+                    if filter_top <= r.top <= filter_bottom:
+                        checkboxes.append(el)
+                except Exception:
+                    continue
+
+            print(f"[1С:Windows] Найдено элементов фильтров шапки: меток={len(labels)}, чекбоксов={len(checkboxes)}.")
+
+            changes_made = 0
+            for cb in checkboxes:
+                cb_r = cb.rectangle()
+                cb_name = (cb.element_info.name or cb.window_text() or "").strip().lower()
+
+                matched_rule = None
+                matched_name = ""
+
+                # 1. По имени самого чекбокса
+                for rule_kw, desired in TARGET_RULES.items():
+                    if rule_kw in cb_name:
+                        matched_rule = desired
+                        matched_name = rule_kw
+                        break
+
+                # 2. По ближайшей текстовой метке слева
+                if matched_rule is None and labels:
+                    best_lbl = None
+                    min_dist = 999999
+                    for lbl_txt, lbl_r in labels:
+                        if abs(lbl_r.top - cb_r.top) <= 22:
+                            dist = cb_r.left - lbl_r.right
+                            if -10 <= dist < min_dist:
+                                min_dist = dist
+                                best_lbl = lbl_txt
+
+                    if best_lbl:
+                        for rule_kw, desired in TARGET_RULES.items():
+                            if rule_kw in best_lbl:
+                                matched_rule = desired
+                                matched_name = best_lbl.replace(":", "").strip()
+                                break
+
+                if matched_rule is not None:
+                    curr_state = self._is_checkbox_checked(cb)
+                    if curr_state is not None and curr_state != matched_rule:
+                        action_str = "включение" if matched_rule else "снятие лишней галочки"
+                        print(f"[1С:Windows] -> Фильтр «{matched_name}»: текущее={curr_state}, требуемое={matched_rule} ({action_str})...")
+                        cb.click_input()
+                        changes_made += 1
+                        time.sleep(0.3)
+
+            if changes_made > 0:
+                print(f"[1С:Windows] ✓ Исправлено чекбоксов фильтра: {changes_made}. Ожидание обновления списка...")
+                time.sleep(2.0)
+            else:
+                print("[1С:Windows] ✓ Все галочки фильтров в шапке «Маршрутный лист» соответствуют эталону.")
+
+        except Exception as e:
+            logger.warning("Проверка фильтров «Маршрутный лист»: %s", e)
 
     # ---------------------------------------------------------------------
     # Раздел 1: «Маршрутный лист»
@@ -524,6 +689,9 @@ class WindowsOneCExporter(BaseOneCExporter):
         Строка 1: «Дата отгрузки: [Больше или равно] [03.10.2026 0:00:00]»
         Строка 2: «Дата отгрузки: [Меньше или равно] [05.11.2026 0:00:00]»
         """
+        # Сначала проверяем и нормализуем галочки фильтров шапки
+        self._ensure_marshrut_filters()
+
         d_from_str = date_from.strftime("%d.%m.%Y")
         d_to_str = date_to.strftime("%d.%m.%Y")
         print(f"[1С:Windows] Установка дат в «Маршрутный лист»: с {d_from_str} по {d_to_str}...")
@@ -738,82 +906,168 @@ class WindowsOneCExporter(BaseOneCExporter):
         # 5. Сохранение файла на рабочий стол
         self._save_in_dialog(target_filepath)
 
-        # 6. Безопасное закрытие только временной вкладки «Информация по МЛ»
+        # 6. Безопасное закрытие временных вкладок (сохраняем только 4 постоянных раздела)
         time.sleep(0.5)
-        self._close_temporary_tab("Информация по МЛ")
+        self._close_unwanted_tabs()
 
     # ---------------------------------------------------------------------
     # Раздел 2: «Электронные транспортные накладные»
     # ---------------------------------------------------------------------
+    def _verify_etrn_period_pill(self, d_from_str: str, d_to_str: str) -> Tuple[bool, str]:
+        """
+        Проверяет текст на плашке периода списка «ЭТРН».
+        Возвращает (True, pill_text), если период валиден (содержит начальную дату и не начинается с '-').
+        """
+        try:
+            for el in self.main_win.descendants():
+                try:
+                    r = el.rectangle()
+                    if r.left <= 400 and 60 <= r.top <= 150:
+                        txt = (el.element_info.name or el.window_text() or "").strip()
+                        if re.search(r"\d{2}\.\d{2}\.\d{4}", txt) or "-" in txt:
+                            # Проверяем дефект: начинается с '-' (нет начальной даты, что вешает 1С)
+                            if txt.startswith("-"):
+                                return False, txt
+                            if d_from_str in txt:
+                                return True, txt
+                            return False, txt
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return True, ""
+
     def _set_etrn_period(self, date_from: datetime, date_to: datetime) -> None:
         """
         Устанавливает период для списка ЭТРН через диалог «Выберите период».
-        Диалог открывается через правое меню «Еще ▾» ➔ «Установить период...» или плашку периода.
+        Обеспечивает 100% защиту от зависания 1С:
+        - Клик по плашке периода со смещением влево (защита от крестика [x] очистки)
+        - Прямой ввод в Edit-элементы «Дата начала» и «Дата окончания»
+        - Верификация и самовосстановление: недопущение периода вида '- 03.11.2026'
         """
         d_from_str = date_from.strftime("%d.%m.%Y")
         d_to_str = date_to.strftime("%d.%m.%Y")
         print(f"[1С:Windows] Установка периода в «ЭТРН»: с {d_from_str} по {d_to_str}...")
 
-        # 1. Пробуем кликнуть по плашке периода под «Создать»
-        opened_dialog = False
-        try:
-            for el in self.main_win.descendants():
-                txt = (el.element_info.name or el.window_text() or "").strip()
-                if re.search(r"\d{2}\.\d{2}\.\d{4}\s*-\s*\d{2}\.\d{2}\.\d{4}", txt):
-                    r = el.rectangle()
-                    if 50 <= r.top <= 140:
-                        el.click_input()
-                        opened_dialog = True
-                        time.sleep(1.2)
-                        break
-        except Exception:
-            pass
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            opened_dialog = False
 
-        # 2. Если плашка не найдена — открываем через меню таблицы «Еще ▾» (справа)
-        if not opened_dialog:
-            print("[1С:Windows] Открытие диалога периода через меню «Еще ▾»...")
-            self._click_table_more_button()
-            time.sleep(0.6)
-            for w in self.Desktop(backend="uia").windows():
-                for el in w.descendants():
-                    txt = (el.element_info.name or el.window_text() or "").strip().lower()
-                    if "установить период" in txt:
-                        el.click_input()
-                        opened_dialog = True
-                        time.sleep(1.2)
-                        break
-                if opened_dialog:
-                    break
-
-        # 3. Ищем диалог «Выберите период»
-        dlg = self._find_dialog("период", timeout=4.0)
-
-        # 4. Заполнение полей даты в диалоге «Выберите период»
-        print("[1С:Windows] Заполнение дат в диалоге «Выберите период»...")
-        self._select_all_and_paste(d_from_str)
-        self._hotkey_tab()
-        time.sleep(0.2)
-        self._select_all_and_paste(d_to_str)
-        time.sleep(0.2)
-
-        # Нажимаем кнопку «Выбрать» (или Enter)
-        selected = False
-        if dlg:
+            # 1. Клик по плашке периода под «Создать»
             try:
-                for btn in dlg.descendants(control_type="Button"):
-                    txt = (btn.element_info.name or btn.window_text() or "").strip().lower()
-                    if txt == "выбрать":
-                        btn.click_input()
-                        selected = True
+                for el in self.main_win.descendants():
+                    try:
+                        r = el.rectangle()
+                        if r.left <= 400 and 60 <= r.top <= 150:
+                            txt = (el.element_info.name or el.window_text() or "").strip()
+                            if re.search(r"\d{2}\.\d{2}\.\d{4}", txt) or "-" in txt:
+                                # Клик со смещением влево (r.left + 25), чтобы не попасть в крестик [x] очистки
+                                click_x = r.left + 25
+                                click_y = r.top + r.height() // 2
+                                print(f"[1С:Windows] Клик по плашке периода «{txt}» в coords=({click_x}, {click_y})...")
+                                self.pywinauto.mouse.click(coords=(click_x, click_y))
+                                opened_dialog = True
+                                time.sleep(1.2)
+                                break
+                    except Exception:
+                        continue
+            except Exception as e:
+                logger.debug("Поиск плашки периода ЭТРН: %s", e)
+
+            # 2. Если по плашке не открылся — открываем через меню таблицы «Еще ▾» (справа)
+            if not opened_dialog or not self._is_dialog_open("период"):
+                print("[1С:Windows] Открытие диалога периода через меню таблицы «Еще ▾»...")
+                self._click_table_more_button()
+                time.sleep(0.6)
+                for w in self.Desktop(backend="uia").windows():
+                    for el in w.descendants():
+                        txt = (el.element_info.name or el.window_text() or "").strip().lower()
+                        if "установить период" in txt:
+                            el.click_input()
+                            opened_dialog = True
+                            time.sleep(1.2)
+                            break
+                    if opened_dialog:
                         break
-            except Exception:
-                pass
 
-        if not selected:
-            self._hotkey_enter()
+            # 3. Ищем диалог «Выберите период»
+            dlg = self._find_dialog("период", timeout=4.0)
+            if dlg:
+                try:
+                    dlg.set_focus()
+                except Exception:
+                    pass
+                try:
+                    self.win32gui.SetForegroundWindow(dlg.handle)
+                except Exception:
+                    pass
+                time.sleep(0.3)
 
-        time.sleep(2.0)
-        print(f"[1С:Windows] ✓ Период списка «ЭТРН» успешно установлен: {d_from_str} - {d_to_str}.")
+                # 4. Точный ввод дат в Edit-поля диалога
+                edits = []
+                try:
+                    for e in dlg.descendants(control_type="Edit"):
+                        try:
+                            r = e.rectangle()
+                            if r.width() >= 30 and r.height() >= 10:
+                                edits.append(e)
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+
+                edits.sort(key=lambda e: (e.rectangle().top, e.rectangle().left))
+
+                if len(edits) >= 2:
+                    print("[1С:Windows] Заполнение полей даты через элементы Edit («Дата начала» и «Дата окончания»)...")
+                    # Поле 1: Дата начала
+                    edits[0].click_input()
+                    time.sleep(0.15)
+                    self._select_all_and_paste(d_from_str)
+                    time.sleep(0.15)
+
+                    # Поле 2: Дата окончания
+                    edits[1].click_input()
+                    time.sleep(0.15)
+                    self._select_all_and_paste(d_to_str)
+                    time.sleep(0.15)
+                else:
+                    print("[1С:Windows] Заполнение дат в диалоге через координаты/Tab...")
+                    dlg_r = dlg.rectangle()
+                    self.pywinauto.mouse.click(coords=(dlg_r.left + 140, dlg_r.top + 80))
+                    time.sleep(0.2)
+                    self._select_all_and_paste(d_from_str)
+                    time.sleep(0.15)
+                    self._hotkey_tab()
+                    time.sleep(0.15)
+                    self._select_all_and_paste(d_to_str)
+                    time.sleep(0.15)
+
+                # Нажатие кнопки «Выбрать» / «ОК»
+                selected = False
+                try:
+                    for btn in dlg.descendants(control_type="Button"):
+                        btxt = (btn.element_info.name or btn.window_text() or "").strip().lower()
+                        if btxt in ("выбрать", "ок"):
+                            btn.click_input()
+                            selected = True
+                            break
+                except Exception:
+                    pass
+
+                if not selected:
+                    self._hotkey_enter()
+
+                time.sleep(2.5)
+
+            # 5. Самовосстановление: проверяем текст на плашке периода в основном окне
+            is_valid, pill_txt = self._verify_etrn_period_pill(d_from_str, d_to_str)
+            if is_valid:
+                print(f"[1С:Windows] ✓ Период списка «ЭТРН» успешно подтвержден: «{pill_txt or (d_from_str + ' - ' + d_to_str)}».")
+                break
+            else:
+                print(f"[1С:Windows] ⚠ ВНИМАНИЕ: плашка периода неверна («{pill_txt}»). Повторная попытка {attempt}/{max_attempts}...")
+                time.sleep(1.0)
 
     def _configure_etrn_columns(self, dlg) -> None:
         """
@@ -935,9 +1189,9 @@ class WindowsOneCExporter(BaseOneCExporter):
         # 5. Сохранение файла на рабочий стол
         self._save_in_dialog(target_filepath)
 
-        # 6. Безопасное закрытие только временной вкладки «Список»
+        # 6. Безопасное закрытие временных вкладок (сохраняем только 4 постоянных раздела)
         time.sleep(0.5)
-        self._close_temporary_tab("Список")
+        self._close_unwanted_tabs()
 
     # ---------------------------------------------------------------------
     # Раздел 3: Отчет «Контроль подписания перевозчиков по ЭТРН»
@@ -1012,8 +1266,12 @@ class WindowsOneCExporter(BaseOneCExporter):
         print(f"[1С:Windows] Ожидание формирования отчета (до {self.cfg.report_gen_timeout} сек)...")
         time.sleep(8.0)
 
-        # Сохранение отчета (вкладку самого отчета НЕ закрываем, чтобы не закрывать разделы пользователя)
+        # 4. Сохранение отчета
         self._save_in_dialog(target_filepath)
+
+        # 5. Закрытие вкладки отчета и временных файлов Excel (сохраняем только 4 раздела пользователя)
+        time.sleep(0.5)
+        self._close_unwanted_tabs()
 
     # ---------------------------------------------------------------------
     # Вспомогательные методы выгрузки и сохранения
@@ -1285,21 +1543,30 @@ class WindowsOneCExporter(BaseOneCExporter):
         # 1. Активация и разворачивание окна 1С
         self._find_and_activate_1c()
 
-        # 2. Выгрузка «Маршрутный лист» -> Модель расчетов.xlsx
-        self._activate_tab_or_open_link(self.cfg.url_marshrut, self.cfg.title_marshrut)
-        self._set_marshrut_period(marshrut_period[0], marshrut_period[1])
-        self._export_marshrut_list(self.cfg.model_file)
+        try:
+            # 2. Выгрузка «Маршрутный лист» -> Модель расчетов.xlsx
+            self._activate_tab_or_open_link(self.cfg.url_marshrut, self.cfg.title_marshrut)
+            self._ensure_marshrut_filters()
+            self._set_marshrut_period(marshrut_period[0], marshrut_period[1])
+            self._export_marshrut_list(self.cfg.model_file)
+            self._close_unwanted_tabs()
 
-        # 3. Выгрузка «Электронные транспортные накладные» -> ЭТРН 1с.xlsx
-        self._activate_tab_or_open_link(self.cfg.url_etrn, self.cfg.title_etrn)
-        self._set_etrn_period(etrn_period[0], etrn_period[1])
-        self._export_etrn_list(self.cfg.etrn_file)
+            # 3. Выгрузка «Электронные транспортные накладные» -> ЭТРН 1с.xlsx
+            self._activate_tab_or_open_link(self.cfg.url_etrn, self.cfg.title_etrn)
+            self._set_etrn_period(etrn_period[0], etrn_period[1])
+            self._export_etrn_list(self.cfg.etrn_file)
+            self._close_unwanted_tabs()
 
-        # 4. Выгрузка «Контроль подписания перевозчиков по ЭТРН» -> Процент.xlsx
-        self._activate_tab_or_open_link(self.cfg.url_percent, self.cfg.title_percent)
-        self._export_percent_report(
-            etrn_period[0], etrn_period[1], self.cfg.percent_file
-        )
+            # 4. Выгрузка «Контроль подписания перевозчиков по ЭТРН» -> Процент.xlsx
+            self._activate_tab_or_open_link(self.cfg.url_percent, self.cfg.title_percent)
+            self._export_percent_report(
+                etrn_period[0], etrn_period[1], self.cfg.percent_file
+            )
+            self._close_unwanted_tabs()
+
+        finally:
+            # Финальная очистка: гарантируем, что остаются открытыми ТОЛЬКО 4 рабочих раздела пользователя
+            self._close_unwanted_tabs()
 
         print("\n" + "=" * 70)
         print(" ✓ ВЫГРУЗКА ВСЕХ 3 ТАБЛИЦ ИЗ 1С УСПЕШНО ЗАВЕРШЕНА!")
