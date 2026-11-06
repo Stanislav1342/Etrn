@@ -1297,8 +1297,56 @@ class WindowsOneCExporter(BaseOneCExporter):
         time.sleep(0.3)
         self._hotkey_f5()
 
-        print(f"[1С:Windows] Ожидание формирования отчета (10 сек)...")
-        time.sleep(10.0)
+        # Ожидание завершения формирования отчета
+        max_timeout = max(getattr(self.cfg, "report_gen_timeout", 60), 60)
+        print(f"[1С:Windows] Ожидание формирования отчета (до {max_timeout} сек)...")
+        start_time = time.time()
+        time.sleep(5.0)
+
+        while True:
+            elapsed = int(time.time() - start_time)
+            if elapsed >= max_timeout:
+                print(f"[1С:Windows] Достигнут таймаут ожидания ({max_timeout} сек), переходим к сохранению...")
+                break
+
+            # Проверяем признаки активной генерации отчета
+            is_generating = False
+
+            # 1. Занят ли поток окна 1С (Win32)
+            try:
+                import ctypes
+                if ctypes.windll.user32.IsHungAppWindow(self.main_win.handle):
+                    is_generating = True
+            except Exception:
+                pass
+
+            # 2. Наличие кнопки «Прервать» или статуса «Формирование...»
+            if not is_generating:
+                try:
+                    for el in self.main_win.descendants():
+                        try:
+                            txt = (el.element_info.name or el.window_text() or "").strip().lower()
+                            if any(w in txt for w in ("прервать", "формирован", "выполняется")):
+                                is_generating = True
+                                break
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+
+            if is_generating:
+                print(f"[1С:Windows] 1С формирует отчет... ({elapsed} сек)")
+                time.sleep(3.0)
+            else:
+                # Минимальная пауза 25 сек для завершения серверной выборки
+                if elapsed < 25:
+                    print(f"[1С:Windows] Ожидание завершения выборки отчета... ({elapsed} сек)")
+                    time.sleep(3.0)
+                    continue
+
+                print(f"[1С:Windows] ✓ Отчет успешно сформирован за {elapsed} сек.")
+                time.sleep(2.0)
+                break
 
         # Кликаем в область сформированной таблицы перед сохранением, чтобы передать ей фокус
         table_focus_x = main_r.left + 250
